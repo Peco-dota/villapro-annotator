@@ -1,0 +1,44 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Node (not used here but common)
+node_modules/
+
+# Build artifacts
+dist/
+build/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+.eggs/
+pip-wheel-metadata/
+
+# AnnotateX project files (user data, not source)
+*.annotatex
+~/.annotatex_recent.json
+
+# Exported datasets
+exports/
+output/
+
+# Test images / temp data
+test_images/
+temp/
