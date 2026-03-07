@@ -19,7 +19,7 @@ from app.sidebar_images import ImageSidebar
 from app.sidebar_classes import ClassesSidebar
 from app.toolbar import AnnotateXToolbar
 from app.dialogs import (
-    ClassAssignDialog, ExportDialog, SettingsDialog, NewProjectDialog
+    ClassAssignDialog, ExportDialog, SettingsDialog, NewProjectDialog, AugmentDialog
 )
 from app.utils import add_recent_project
 
@@ -107,6 +107,10 @@ class MainWindow(QMainWindow):
         self._act_export.triggered.connect(self._show_export)
         file_menu.addAction(self._act_export)
 
+        self._act_augment = QAction("Augment Dataset…", self)
+        self._act_augment.triggered.connect(self._show_augment)
+        file_menu.addAction(self._act_augment)
+
         file_menu.addSeparator()
 
         self._act_settings = QAction("Settings…", self)
@@ -162,6 +166,7 @@ class MainWindow(QMainWindow):
         self._toolbar.redo.connect(self._redo)
         self._toolbar.save.connect(self.save_project)
         self._toolbar.export.connect(self._show_export)
+        self._toolbar.augment.connect(self._show_augment)
         self._toolbar.prev_image.connect(self._prev_image)
         self._toolbar.next_image.connect(self._next_image)
 
@@ -601,6 +606,13 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No Project", "Please open a project first.")
             return
         dlg = ExportDialog(self._project, self)
+        dlg.exec()
+
+    def _show_augment(self):
+        if not self._project:
+            QMessageBox.information(self, "No Project", "Please open a project first.")
+            return
+        dlg = AugmentDialog(self._project, self)
         dlg.exec()
 
     def _show_settings(self):

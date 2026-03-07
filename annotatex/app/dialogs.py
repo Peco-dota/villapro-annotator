@@ -1,4 +1,4 @@
-"""Dialogs for AnnotateX: export, settings, class assignment, new project."""
+"""Dialogs for AnnotateX: export, settings, class assignment, new project, augmentation."""
 from __future__ import annotations
 import os
 from typing import Optional, TYPE_CHECKING
@@ -497,3 +497,310 @@ class SettingsDialog(QDialog):
         self.project.settings["canvas_bg"] = self._bg_edit.text().strip()
         self.project.modified = True
         self.accept()
+
+
+# ── Augmentation Dialog ───────────────────────────────────────────────────────
+
+class AugmentWorker(QObject):
+    progress = pyqtSignal(int, int)   # current, total
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, project, output_dir: str, cfg):
+        super().__init__()
+        self.project = project
+        self.output_dir = output_dir
+        self.cfg = cfg
+
+    def run(self):
+        try:
+            from app.augmentation import run_augmentation
+            stats = run_augmentation(
+                self.project, self.output_dir, self.cfg,
+                progress_cb=lambda cur, tot: self.progress.emit(cur, tot)
+            )
+            self.finished.emit(stats)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class AugmentDialog(QDialog):
+    """Dataset augmentation dialog — shown after annotation is complete."""
+
+    def __init__(self, project: "Project", parent=None):
+        super().__init__(parent)
+        self.project = project
+        self.setWindowTitle("Augment Dataset")
+        self.setStyleSheet(DIALOG_STYLE)
+        self.setFixedWidth(520)
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        # Title + summary
+        title = QLabel("Dataset Augmentation")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #a78bfa;")
+        layout.addWidget(title)
+
+        annotated = self.project.annotated_count
+        total = self.project.total_count
+        summary = QLabel(
+            f"{annotated}/{total} images annotated  |  "
+            f"{self.project.total_box_count} boxes  |  "
+            f"{len(self.project.classes)} classes"
+        )
+        summary.setStyleSheet("color: #64748b; font-size: 11px;")
+        layout.addWidget(summary)
+
+        # ── Flip ─────────────────────────────────────────────────────────────
+        flip_grp = QGroupBox("Flip")
+        flip_layout = QHBoxLayout(flip_grp)
+        self._flip_h = QCheckBox("Horizontal (mirror left/right)")
+        self._flip_h.setChecked(True)
+        self._flip_v = QCheckBox("Vertical (mirror top/bottom)")
+        flip_layout.addWidget(self._flip_h)
+        flip_layout.addWidget(self._flip_v)
+        layout.addWidget(flip_grp)
+
+        # ── Color ─────────────────────────────────────────────────────────────
+        color_grp = QGroupBox("Color Adjustments")
+        color_form = QFormLayout(color_grp)
+        color_form.setSpacing(6)
+
+        self._brightness_cb = QCheckBox()
+        self._brightness_cb.setChecked(True)
+        self._brightness_min = QDoubleSpinBox()
+        self._brightness_min.setRange(0.1, 1.0)
+        self._brightness_min.setSingleStep(0.1)
+        self._brightness_min.setValue(0.6)
+        self._brightness_max = QDoubleSpinBox()
+        self._brightness_max.setRange(1.0, 2.0)
+        self._brightness_max.setSingleStep(0.1)
+        self._brightness_max.setValue(1.4)
+        brightness_row = QHBoxLayout()
+        brightness_row.addWidget(self._brightness_cb)
+        brightness_row.addWidget(QLabel("Range:"))
+        brightness_row.addWidget(self._brightness_min)
+        brightness_row.addWidget(QLabel("–"))
+        brightness_row.addWidget(self._brightness_max)
+        color_form.addRow("Brightness:", brightness_row)
+
+        self._contrast_cb = QCheckBox()
+        self._contrast_cb.setChecked(True)
+        self._contrast_min = QDoubleSpinBox()
+        self._contrast_min.setRange(0.1, 1.0)
+        self._contrast_min.setSingleStep(0.1)
+        self._contrast_min.setValue(0.6)
+        self._contrast_max = QDoubleSpinBox()
+        self._contrast_max.setRange(1.0, 2.0)
+        self._contrast_max.setSingleStep(0.1)
+        self._contrast_max.setValue(1.4)
+        contrast_row = QHBoxLayout()
+        contrast_row.addWidget(self._contrast_cb)
+        contrast_row.addWidget(QLabel("Range:"))
+        contrast_row.addWidget(self._contrast_min)
+        contrast_row.addWidget(QLabel("–"))
+        contrast_row.addWidget(self._contrast_max)
+        color_form.addRow("Contrast:", contrast_row)
+
+        self._saturation_cb = QCheckBox()
+        self._saturation_cb.setChecked(True)
+        self._saturation_min = QDoubleSpinBox()
+        self._saturation_min.setRange(0.0, 1.0)
+        self._saturation_min.setSingleStep(0.1)
+        self._saturation_min.setValue(0.5)
+        self._saturation_max = QDoubleSpinBox()
+        self._saturation_max.setRange(1.0, 3.0)
+        self._saturation_max.setSingleStep(0.1)
+        self._saturation_max.setValue(1.5)
+        saturation_row = QHBoxLayout()
+        saturation_row.addWidget(self._saturation_cb)
+        saturation_row.addWidget(QLabel("Range:"))
+        saturation_row.addWidget(self._saturation_min)
+        saturation_row.addWidget(QLabel("–"))
+        saturation_row.addWidget(self._saturation_max)
+        color_form.addRow("Saturation:", saturation_row)
+
+        layout.addWidget(color_grp)
+
+        # ── Noise / Blur ──────────────────────────────────────────────────────
+        noise_grp = QGroupBox("Noise & Blur")
+        noise_form = QFormLayout(noise_grp)
+        noise_form.setSpacing(6)
+
+        self._blur_cb = QCheckBox()
+        self._blur_radius = QDoubleSpinBox()
+        self._blur_radius.setRange(0.5, 5.0)
+        self._blur_radius.setSingleStep(0.5)
+        self._blur_radius.setValue(1.5)
+        blur_row = QHBoxLayout()
+        blur_row.addWidget(self._blur_cb)
+        blur_row.addWidget(QLabel("Radius:"))
+        blur_row.addWidget(self._blur_radius)
+        noise_form.addRow("Gaussian Blur:", blur_row)
+
+        self._noise_cb = QCheckBox()
+        self._noise_std = QSpinBox()
+        self._noise_std.setRange(1, 60)
+        self._noise_std.setValue(15)
+        noise_row = QHBoxLayout()
+        noise_row.addWidget(self._noise_cb)
+        noise_row.addWidget(QLabel("Std:"))
+        noise_row.addWidget(self._noise_std)
+        noise_form.addRow("Gaussian Noise:", noise_row)
+
+        layout.addWidget(noise_grp)
+
+        # ── Rotation ──────────────────────────────────────────────────────────
+        rot_grp = QGroupBox("Rotation")
+        rot_layout = QHBoxLayout(rot_grp)
+        self._rotation_cb = QCheckBox("Enable")
+        self._rotation_deg = QSpinBox()
+        self._rotation_deg.setRange(1, 45)
+        self._rotation_deg.setValue(15)
+        self._rotation_deg.setSuffix("°")
+        rot_layout.addWidget(self._rotation_cb)
+        rot_layout.addWidget(QLabel("Max angle ±"))
+        rot_layout.addWidget(self._rotation_deg)
+        rot_layout.addStretch()
+        layout.addWidget(rot_grp)
+
+        # ── Output options ────────────────────────────────────────────────────
+        out_grp = QGroupBox("Output Options")
+        out_form = QFormLayout(out_grp)
+        out_form.setSpacing(6)
+
+        self._copies_spin = QSpinBox()
+        self._copies_spin.setRange(1, 10)
+        self._copies_spin.setValue(2)
+        self._copies_spin.setSuffix(" per image")
+        out_form.addRow("Augmented copies:", self._copies_spin)
+
+        self._only_annotated_cb = QCheckBox("Only augment annotated images")
+        self._only_annotated_cb.setChecked(True)
+        out_form.addRow("", self._only_annotated_cb)
+
+        self._include_originals_cb = QCheckBox("Include original images in output")
+        self._include_originals_cb.setChecked(True)
+        out_form.addRow("", self._include_originals_cb)
+
+        layout.addWidget(out_grp)
+
+        # ── Output directory ──────────────────────────────────────────────────
+        dir_grp = QGroupBox("Output Directory")
+        dir_layout = QHBoxLayout(dir_grp)
+        self._out_edit = QLineEdit()
+        self._out_edit.setPlaceholderText("Select output folder…")
+        self._out_edit.setReadOnly(True)
+        dir_layout.addWidget(self._out_edit)
+        browse_btn = QPushButton("Browse…")
+        browse_btn.clicked.connect(self._browse_output)
+        dir_layout.addWidget(browse_btn)
+        layout.addWidget(dir_grp)
+
+        # ── Progress bar ──────────────────────────────────────────────────────
+        self._progress = QProgressBar()
+        self._progress.setVisible(False)
+        self._progress.setStyleSheet("""
+            QProgressBar {
+                background-color: #0f172a;
+                border: 1px solid #334155;
+                border-radius: 4px;
+                height: 16px;
+            }
+            QProgressBar::chunk { background-color: #7c3aed; border-radius: 3px; }
+        """)
+        layout.addWidget(self._progress)
+
+        self._status_lbl = QLabel("")
+        self._status_lbl.setStyleSheet("color: #64748b; font-size: 10px;")
+        layout.addWidget(self._status_lbl)
+
+        # ── Buttons ───────────────────────────────────────────────────────────
+        btns = QHBoxLayout()
+        btns.addStretch()
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.clicked.connect(self.reject)
+        btns.addWidget(self._cancel_btn)
+        self._run_btn = QPushButton("Run Augmentation")
+        self._run_btn.setStyleSheet(PRIMARY_BTN)
+        self._run_btn.clicked.connect(self._run)
+        btns.addWidget(self._run_btn)
+        layout.addLayout(btns)
+
+    def _browse_output(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Output Directory")
+        if folder:
+            self._out_edit.setText(folder)
+
+    def _build_config(self):
+        from app.augmentation import AugConfig
+        return AugConfig(
+            flip_horizontal=self._flip_h.isChecked(),
+            flip_vertical=self._flip_v.isChecked(),
+            brightness=self._brightness_cb.isChecked(),
+            brightness_range=(self._brightness_min.value(), self._brightness_max.value()),
+            contrast=self._contrast_cb.isChecked(),
+            contrast_range=(self._contrast_min.value(), self._contrast_max.value()),
+            saturation=self._saturation_cb.isChecked(),
+            saturation_range=(self._saturation_min.value(), self._saturation_max.value()),
+            blur=self._blur_cb.isChecked(),
+            blur_radius=self._blur_radius.value(),
+            noise=self._noise_cb.isChecked(),
+            noise_std=self._noise_std.value(),
+            rotation=self._rotation_cb.isChecked(),
+            rotation_degrees=float(self._rotation_deg.value()),
+            copies_per_image=self._copies_spin.value(),
+            only_annotated=self._only_annotated_cb.isChecked(),
+            output_original=self._include_originals_cb.isChecked(),
+        )
+
+    def _run(self):
+        output_dir = self._out_edit.text().strip()
+        if not output_dir:
+            QMessageBox.warning(self, "Error", "Please select an output directory.")
+            return
+
+        cfg = self._build_config()
+
+        self._run_btn.setEnabled(False)
+        self._run_btn.setText("Running…")
+        self._progress.setVisible(True)
+        self._progress.setValue(0)
+        self._progress.setMaximum(len(self.project.images))
+
+        self._worker = AugmentWorker(self.project, output_dir, cfg)
+        self._thread = QThread()
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.finished.connect(self._on_done)
+        self._worker.error.connect(self._on_error)
+        self._thread.start()
+
+    def _on_progress(self, current: int, total: int):
+        self._progress.setMaximum(total)
+        self._progress.setValue(current)
+        self._status_lbl.setText(f"Processing image {current}/{total}…")
+
+    def _on_done(self, stats: dict):
+        self._thread.quit()
+        self._thread.wait()
+        msg = (
+            f"Augmentation complete!\n\n"
+            f"Original images: {stats.get('original', 0)}\n"
+            f"Augmented images: {stats.get('augmented', 0)}\n"
+            f"Skipped: {stats.get('skipped', 0)}\n\n"
+            f"Total output: {stats.get('original', 0) + stats.get('augmented', 0)} images"
+        )
+        QMessageBox.information(self, "Done", msg)
+        self.accept()
+
+    def _on_error(self, err: str):
+        self._thread.quit()
+        self._thread.wait()
+        self._run_btn.setEnabled(True)
+        self._run_btn.setText("Run Augmentation")
+        QMessageBox.critical(self, "Augmentation Error", f"Failed:\n{err}")

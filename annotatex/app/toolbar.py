@@ -64,6 +64,7 @@ class AnnotateXToolbar(QWidget):
     redo = pyqtSignal()
     save = pyqtSignal()
     export = pyqtSignal()
+    augment = pyqtSignal()
     prev_image = pyqtSignal()
     next_image = pyqtSignal()
 
@@ -169,6 +170,25 @@ class AnnotateXToolbar(QWidget):
         export_btn.setToolTip("Export Dataset")
         export_btn.clicked.connect(self.export)
         layout.addWidget(export_btn)
+
+        augment_btn = QPushButton("✦  Augment")
+        augment_btn.setFixedHeight(BTN_SIZE)
+        augment_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0f766e;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 0 14px;
+            }
+            QPushButton:hover { background-color: #0d9488; }
+            QPushButton:pressed { background-color: #0f5a55; }
+        """)
+        augment_btn.setToolTip("Augment Dataset")
+        augment_btn.clicked.connect(self.augment)
+        layout.addWidget(augment_btn)
 
     def set_tool(self, tool: str):
         if tool == "select":
