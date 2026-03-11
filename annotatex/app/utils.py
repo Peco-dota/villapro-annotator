@@ -240,6 +240,17 @@ def add_recent_project(path: str):
         pass
 
 
+def remove_recent_project(path: str):
+    recent = load_recent_projects()
+    if path in recent:
+        recent.remove(path)
+    try:
+        with open(RECENT_PROJECTS_FILE, "w") as f:
+            json.dump(recent, f)
+    except Exception:
+        pass
+
+
 # ── Image loading ─────────────────────────────────────────────────────────────
 
 def load_pixmap_safe(path: str):

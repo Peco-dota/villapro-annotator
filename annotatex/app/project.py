@@ -46,6 +46,7 @@ class Project:
         self.annotations: dict[str, ImageAnnotation] = {}  # filename -> ImageAnnotation
         self.current_index: int = 0
         self.modified: bool = False
+        self._annotated_count_cache: Optional[int] = None
 
         # Settings
         self.settings: dict = {
@@ -129,9 +130,16 @@ class Project:
 
     # ── Stats ─────────────────────────────────────────────────────────────────
 
+    def invalidate_annotated_count(self):
+        self._annotated_count_cache = None
+
     @property
     def annotated_count(self) -> int:
-        return sum(1 for ia in self.annotations.values() if ia.box_count > 0)
+        if self._annotated_count_cache is None:
+            self._annotated_count_cache = sum(
+                1 for ia in self.annotations.values() if ia.box_count > 0
+            )
+        return self._annotated_count_cache
 
     @property
     def total_count(self) -> int:

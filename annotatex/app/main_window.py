@@ -21,7 +21,7 @@ from app.toolbar import AnnotateXToolbar
 from app.dialogs import (
     ClassAssignDialog, ExportDialog, SettingsDialog, NewProjectDialog, AugmentDialog
 )
-from app.utils import add_recent_project
+from app.utils import add_recent_project, remove_recent_project
 
 
 MAIN_STYLE = """
@@ -116,6 +116,12 @@ class MainWindow(QMainWindow):
         self._act_settings = QAction("Settings…", self)
         self._act_settings.triggered.connect(self._show_settings)
         file_menu.addAction(self._act_settings)
+
+        file_menu.addSeparator()
+
+        self._act_delete_project = QAction("Delete Project File…", self)
+        self._act_delete_project.triggered.connect(self._delete_project_file)
+        file_menu.addAction(self._act_delete_project)
 
         file_menu.addSeparator()
         quit_act = QAction("Quit", self)
@@ -472,6 +478,8 @@ class MainWindow(QMainWindow):
         self._cls_sidebar.refresh_annotations()
 
     def _on_annotations_changed(self):
+        if self._project:
+            self._project.invalidate_annotated_count()
         self._cls_sidebar.refresh_annotations()
         self._cls_sidebar.update_class_counts()
         if self._project:
@@ -535,6 +543,7 @@ class MainWindow(QMainWindow):
         if not self._project:
             return
         self._project.remove_class(cls_id)
+        self._project.invalidate_annotated_count()
         self._cls_sidebar.refresh_classes()
         self._cls_sidebar.refresh_annotations()
         self._canvas.reload_annotations()
@@ -614,6 +623,31 @@ class MainWindow(QMainWindow):
             return
         dlg = AugmentDialog(self._project, self)
         dlg.exec()
+
+    def _delete_project_file(self):
+        if not self._project or not self._project.path:
+            QMessageBox.information(self, "Delete Project", "Project has not been saved to disk yet.")
+            return
+        path = self._project.path
+        name = os.path.basename(path)
+        reply = QMessageBox.warning(
+            self,
+            "Delete Project",
+            f"Delete '{name}' from disk?\n\nThis cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not delete file:\n{e}")
+            return
+        remove_recent_project(path)
+        self._project.path = None
+        self._project.modified = False
+        self._update_title()
 
     def _show_settings(self):
         if not self._project:

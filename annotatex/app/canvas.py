@@ -12,7 +12,8 @@ from PyQt6.QtWidgets import (
     QRubberBand, QSizePolicy, QApplication,
 )
 from PyQt6.QtCore import (
-    Qt, QRectF, QPointF, QSizeF, QSize, QRect, pyqtSignal, QObject
+    Qt, QRectF, QPointF, QSizeF, QSize, QRect, pyqtSignal, QObject,
+    QRunnable, QThreadPool,
 )
 from PyQt6.QtGui import (
     QPixmap, QPen, QBrush, QColor, QFont, QPainter,
@@ -27,6 +28,22 @@ if TYPE_CHECKING:
 
 HANDLE_SIZE = 8
 MIN_BOX_PX = 4  # minimum box size in pixels
+
+
+class _ImageLoaderWorker(QRunnable):
+    """Loads a QPixmap in a background thread."""
+
+    class Signals(QObject):
+        done = pyqtSignal(str, object)  # path, QPixmap
+
+    def __init__(self, path: str):
+        super().__init__()
+        self.path = path
+        self.signals = _ImageLoaderWorker.Signals()
+
+    def run(self):
+        pm = QPixmap(self.path)
+        self.signals.done.emit(self.path, pm)
 
 
 class Handle(QGraphicsRectItem):
@@ -314,6 +331,7 @@ class AnnotationCanvas(QGraphicsView):
         self._crosshair: bool = False
         self._img_w: int = 0
         self._img_h: int = 0
+        self._pending_path: str = ""
 
         self._setup_view()
 
@@ -339,19 +357,29 @@ class AnnotationCanvas(QGraphicsView):
         self.setBackgroundBrush(QBrush(QColor(self._bg_color)))
 
     def load_image(self, path: str):
-        """Load an image onto the canvas and render annotations."""
+        """Load an image onto the canvas asynchronously."""
+        self._pending_path = path
+        # Clear immediately so the old image doesn't linger
         self._clear_annotations()
-        self._pixmap_item = None
-
-        pm = QPixmap(path)
-        if pm.isNull():
-            self._scene.clear()
-            return
-
         self._scene.clear()
         self._annotation_items.clear()
         self._selected_ids.clear()
         self._undo_stack.clear()
+        self._pixmap_item = None
+        self._img_w = 0
+        self._img_h = 0
+
+        worker = _ImageLoaderWorker(path)
+        worker.signals.done.connect(self._on_image_loaded)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_image_loaded(self, path: str, pm: QPixmap):
+        """Called on main thread when the background loader finishes."""
+        # Discard if user navigated away before this finished
+        if path != self._pending_path:
+            return
+        if pm.isNull():
+            return
 
         self._pixmap_item = QGraphicsPixmapItem(pm)
         self._pixmap_item.setZValue(0)
@@ -497,9 +525,7 @@ class AnnotationCanvas(QGraphicsView):
 
         item = AnnotationItem(box, color, label, self._img_w, self._img_h, self._opacity)
         self._scene.addItem(item)
-        item._create_label()
-        if item._label_item:
-            self._scene.addItem(item._label_item)
+        item._create_label()  # adds label to scene internally once item has a scene
         self._annotation_items[box.id] = item
         return item
 

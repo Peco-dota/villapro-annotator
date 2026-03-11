@@ -12,12 +12,12 @@ sys.path.insert(0, os.path.dirname(__file__))
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QListWidget, QListWidgetItem,
-    QFrame, QFileDialog,
+    QFrame, QFileDialog, QMenu, QMessageBox,
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QFont, QColor, QPalette, QIcon
 
-from app.utils import load_recent_projects, add_recent_project
+from app.utils import load_recent_projects, add_recent_project, remove_recent_project
 from app.project import Project
 
 
@@ -158,6 +158,8 @@ class WelcomeScreen(QWidget):
 
         self._recent_list = QListWidget()
         self._recent_list.itemDoubleClicked.connect(self._on_recent_double_click)
+        self._recent_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._recent_list.customContextMenuRequested.connect(self._on_recent_context_menu)
         right_layout.addWidget(self._recent_list)
 
         open_recent_btn = QPushButton("Open Selected")
@@ -205,6 +207,56 @@ class WelcomeScreen(QWidget):
         item = self._recent_list.currentItem()
         if item:
             self._on_recent_double_click(item)
+
+    def _on_recent_context_menu(self, pos):
+        item = self._recent_list.itemAt(pos)
+        if not item:
+            return
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if not path:
+            return
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1e293b;
+                color: #e2e8f0;
+                border: 1px solid #334155;
+            }
+            QMenu::item:selected { background-color: #7c3aed; }
+        """)
+        open_act = menu.addAction("Open Project")
+        menu.addSeparator()
+        remove_act = menu.addAction("Remove from Recents")
+        delete_act = menu.addAction("Delete Project File…")
+
+        action = menu.exec(self._recent_list.mapToGlobal(pos))
+        if action == open_act:
+            self.recent_project_requested.emit(path)
+        elif action == remove_act:
+            remove_recent_project(path)
+            self._load_recent()
+        elif action == delete_act:
+            self._delete_project_file(path)
+
+    def _delete_project_file(self, path: str):
+        name = os.path.basename(path)
+        reply = QMessageBox.warning(
+            self,
+            "Delete Project",
+            f"Delete '{name}' from disk?\n\nThis cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not delete file:\n{e}")
+            return
+        remove_recent_project(path)
+        self._load_recent()
 
 
 def main():

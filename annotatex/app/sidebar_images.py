@@ -152,6 +152,7 @@ class ImageSidebar(QWidget):
         self._project: Optional["Project"] = None
         self._items: list[ImageThumbnailItem] = []
         self._list_items: list[QListWidgetItem] = []
+        self._active_index: int = -1
         self._pool = QThreadPool.globalInstance()
         self._pool.setMaxThreadCount(4)
 
@@ -209,6 +210,7 @@ class ImageSidebar(QWidget):
         self._list.clear()
         self._items.clear()
         self._list_items.clear()
+        self._active_index = -1
 
         for i, fn in enumerate(project.images):
             widget = ImageThumbnailItem(fn, i)
@@ -231,9 +233,10 @@ class ImageSidebar(QWidget):
 
     def set_current_index(self, index: int):
         if 0 <= index < len(self._items):
-            # Deactivate all
-            for w in self._items:
-                w.set_active(False)
+            # Deactivate only the previously active item
+            if 0 <= self._active_index < len(self._items):
+                self._items[self._active_index].set_active(False)
+            self._active_index = index
             self._items[index].set_active(True)
             # Block signal to avoid recursive navigation
             self._list.blockSignals(True)
