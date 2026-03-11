@@ -898,7 +898,9 @@ class AnnotationCanvas(QGraphicsView):
         elif key == Qt.Key.Key_F:
             self.fit_to_window()
         else:
-            super().keyPressEvent(event)
+            # Don't consume — let the event propagate to QMainWindow shortcuts
+            event.ignore()
+            return
 
     def keyReleaseEvent(self, event: QKeyEvent):
         if event.key() == Qt.Key.Key_Space:

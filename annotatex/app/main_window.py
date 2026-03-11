@@ -150,6 +150,7 @@ class MainWindow(QMainWindow):
         edit_menu.addSeparator()
         copy_prev_act = QAction("Copy Boxes from Previous Image", self)
         copy_prev_act.setShortcut(QKeySequence("C"))
+        copy_prev_act.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         copy_prev_act.triggered.connect(self._copy_boxes_from_prev)
         edit_menu.addAction(copy_prev_act)
 
@@ -279,9 +280,6 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("V"), self, lambda: self._set_tool("select"))
         QShortcut(QKeySequence("S"), self, lambda: self._set_tool("select"))
         QShortcut(QKeySequence("R"), self, lambda: self._set_tool("draw"))
-
-        # Copy boxes from previous image
-        QShortcut(QKeySequence("C"), self, self._copy_boxes_from_prev)
 
         # Class selection 1-9
         for i in range(1, 10):
@@ -456,14 +454,19 @@ class MainWindow(QMainWindow):
         if curr_ia is None:
             return
         self._canvas._push_undo()
+        new_ids = []
         for box in prev_ia.boxes:
             new_box = copy.deepcopy(box)
             new_box.id = str(uuid.uuid4())
             new_box.confidence = None
             curr_ia.boxes.append(new_box)
+            new_ids.append(new_box.id)
         self._project.modified = True
         self._project.invalidate_annotated_count()
         self._canvas.reload_annotations()
+        # Select all copied boxes so handles are visible and draggable
+        for i, bid in enumerate(new_ids):
+            self._canvas.select_box(bid, multi=(i > 0))
         self._canvas.annotations_changed.emit()
 
     def _on_image_selected(self, index: int):
