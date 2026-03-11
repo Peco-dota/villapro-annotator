@@ -289,6 +289,7 @@ class AnnotationCanvas(QGraphicsView):
     annotations_changed = pyqtSignal()        # any change to annotations
     zoom_changed = pyqtSignal(float)          # zoom factor
     right_click_box = pyqtSignal(object, object)  # BoundingBox, QPoint
+    tool_changed = pyqtSignal(str)            # emitted when canvas switches tool internally
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -598,6 +599,19 @@ class AnnotationCanvas(QGraphicsView):
 
         if event.button() == Qt.MouseButton.LeftButton:
             if self._tool == "draw":
+                # In draw mode, still allow handle-resize on the selected box
+                for bid in self._selected_ids:
+                    item = self._annotation_items.get(bid)
+                    if item:
+                        h = item.handle_at(scene_pos)
+                        if h:
+                            self._resize_handle = h
+                            self._resize_item = item
+                            self._resize_start_pos = scene_pos
+                            self._resize_start_rect = QRectF(item.rect())
+                            self._push_undo()
+                            event.accept()
+                            return
                 self._start_drawing(scene_pos)
             elif self._tool == "select":
                 self._start_select_or_move(scene_pos, event.modifiers())
@@ -626,9 +640,21 @@ class AnnotationCanvas(QGraphicsView):
         elif self._move_item and self._move_start_pos:
             self._update_move(scene_pos)
 
-        # Cursor update in select mode
-        if self._tool == "select" and not self._resize_handle and not self._move_item:
-            self._update_cursor_for_pos(scene_pos)
+        # Cursor update: show resize cursors over handles in both modes
+        if not self._resize_handle and not self._move_item and not self._drawing:
+            if self._tool == "select":
+                self._update_cursor_for_pos(scene_pos)
+            elif self._tool == "draw":
+                # Only update cursor if hovering over a handle of the selected box
+                for bid in self._selected_ids:
+                    item = self._annotation_items.get(bid)
+                    if item:
+                        h = item.handle_at(scene_pos)
+                        if h:
+                            self.setCursor(h.cursor())
+                            super().mouseMoveEvent(event)
+                            return
+                self.setCursor(Qt.CursorShape.CrossCursor)
 
         super().mouseMoveEvent(event)
 

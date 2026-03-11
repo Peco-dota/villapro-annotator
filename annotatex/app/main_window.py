@@ -147,6 +147,12 @@ class MainWindow(QMainWindow):
         del_act.triggered.connect(lambda: self._canvas.delete_selected() if self._canvas else None)
         edit_menu.addAction(del_act)
 
+        edit_menu.addSeparator()
+        copy_prev_act = QAction("Copy Boxes from Previous Image", self)
+        copy_prev_act.setShortcut(QKeySequence("C"))
+        copy_prev_act.triggered.connect(self._copy_boxes_from_prev)
+        edit_menu.addAction(copy_prev_act)
+
         # View
         view_menu = mb.addMenu("View")
         fit_act = QAction("Fit to Window", self)
@@ -204,6 +210,7 @@ class MainWindow(QMainWindow):
         self._canvas.annotations_changed.connect(self._on_annotations_changed)
         self._canvas.zoom_changed.connect(self._on_zoom_changed)
         self._canvas.right_click_box.connect(self._on_right_click_box)
+        self._canvas.tool_changed.connect(self._toolbar.set_tool)
         content_layout.addWidget(self._canvas, stretch=1)
 
         # Right sidebar
@@ -272,6 +279,9 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("V"), self, lambda: self._set_tool("select"))
         QShortcut(QKeySequence("S"), self, lambda: self._set_tool("select"))
         QShortcut(QKeySequence("R"), self, lambda: self._set_tool("draw"))
+
+        # Copy boxes from previous image
+        QShortcut(QKeySequence("C"), self, self._copy_boxes_from_prev)
 
         # Class selection 1-9
         for i in range(1, 10):
@@ -429,6 +439,32 @@ class MainWindow(QMainWindow):
     def _next_image(self):
         if self._project:
             self._navigate_to(self._project.current_index + 1)
+
+    def _copy_boxes_from_prev(self):
+        """Copy all bounding boxes from the previous image onto the current image."""
+        if not self._project or not self._project.images:
+            return
+        idx = self._project.current_index
+        if idx == 0:
+            return  # no previous image
+        prev_fn = self._project.images[idx - 1]
+        prev_ia = self._project.annotations.get(prev_fn)
+        if not prev_ia or not prev_ia.boxes:
+            return
+        import copy, uuid
+        curr_ia = self._project.current_annotation()
+        if curr_ia is None:
+            return
+        self._canvas._push_undo()
+        for box in prev_ia.boxes:
+            new_box = copy.deepcopy(box)
+            new_box.id = str(uuid.uuid4())
+            new_box.confidence = None
+            curr_ia.boxes.append(new_box)
+        self._project.modified = True
+        self._project.invalidate_annotated_count()
+        self._canvas.reload_annotations()
+        self._canvas.annotations_changed.emit()
 
     def _on_image_selected(self, index: int):
         if self._project:
