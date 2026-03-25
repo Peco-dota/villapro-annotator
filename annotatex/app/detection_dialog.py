@@ -5,10 +5,10 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QSpinBox, QFileDialog, QFormLayout, QWidget,
     QScrollArea, QFrame, QMessageBox, QSizePolicy, QCheckBox,
-    QTextEdit,
+    QTextEdit, QMenu,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QMetaObject, Q_ARG
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QAction
 
 from app.detection_service import (
     get_registry, ServiceConfig,
@@ -253,34 +253,58 @@ class ServiceRow(QFrame):
 
         self._status_lbl = QLabel("Stopped")
         self._status_lbl.setStyleSheet("color: #64748b; font-size: 11px;")
-        self._status_lbl.setFixedWidth(80)
+        self._status_lbl.setFixedWidth(72)
         self._status_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         top.addWidget(self._status_lbl)
 
-        self._start_btn = _btn("▶ Start", "#7c3aed", "#6d28d9")
-        self._start_btn.setFixedWidth(80)
+        self._start_btn = _btn("▶  Start", "#7c3aed", "#6d28d9")
+        self._start_btn.setFixedWidth(82)
         self._start_btn.clicked.connect(self._start)
         top.addWidget(self._start_btn)
 
-        self._stop_btn = _btn("■ Stop", "#dc2626", "#b91c1c")
+        self._stop_btn = _btn("■  Stop", "#dc2626", "#b91c1c")
         self._stop_btn.setFixedWidth(76)
         self._stop_btn.clicked.connect(self._stop)
         top.addWidget(self._stop_btn)
 
-        self._relaunch_btn = _btn("↺ Relaunch", "#1e3a5f", "#1e4a7f", "#93c5fd", border_color="#1e4a7f")
-        self._relaunch_btn.setFixedWidth(90)
-        self._relaunch_btn.clicked.connect(self._relaunch)
-        top.addWidget(self._relaunch_btn)
-
-        self._edit_btn = _btn("✎ Edit", "#1e293b", "#334155", "#94a3b8", border_color="#334155")
-        self._edit_btn.setFixedWidth(66)
-        self._edit_btn.clicked.connect(self._edit)
-        top.addWidget(self._edit_btn)
-
-        self._remove_btn = _btn("✕", "#1e293b", "#450a0a", "#dc2626", border_color="#334155")
-        self._remove_btn.setFixedWidth(30)
-        self._remove_btn.clicked.connect(self._remove)
-        top.addWidget(self._remove_btn)
+        # ⋯ menu: Relaunch / Edit / Remove
+        self._more_btn = QPushButton("⋯")
+        self._more_btn.setFixedWidth(34)
+        self._more_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1e293b;
+                color: #94a3b8;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                font-size: 15px;
+                font-weight: bold;
+                padding: 3px 0;
+            }
+            QPushButton:hover { background-color: #334155; color: #e2e8f0; }
+            QPushButton::menu-indicator { width: 0; }
+        """)
+        more_menu = QMenu(self._more_btn)
+        more_menu.setStyleSheet("""
+            QMenu {
+                background-color: #1e293b;
+                color: #e2e8f0;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QMenu::item { padding: 7px 18px; border-radius: 4px; font-size: 12px; }
+            QMenu::item:selected { background-color: #7c3aed; }
+            QMenu::separator { height: 1px; background: #334155; margin: 3px 8px; }
+        """)
+        self._act_relaunch = more_menu.addAction("↺  Relaunch")
+        self._act_relaunch.triggered.connect(self._relaunch)
+        self._act_edit = more_menu.addAction("✎  Edit config")
+        self._act_edit.triggered.connect(self._edit)
+        more_menu.addSeparator()
+        self._act_remove = more_menu.addAction("✕  Remove")
+        self._act_remove.triggered.connect(self._remove)
+        self._more_btn.setMenu(more_menu)
+        top.addWidget(self._more_btn)
 
         outer.addLayout(top)
 
@@ -351,8 +375,8 @@ class ServiceRow(QFrame):
 
         self._start_btn.setEnabled(state in (STATE_STOPPED, STATE_ERROR))
         self._stop_btn.setEnabled(running or loading)
-        self._relaunch_btn.setEnabled(state != STATE_LOADING)
-        self._edit_btn.setEnabled(state in (STATE_STOPPED, STATE_ERROR))
+        self._act_relaunch.setEnabled(state != STATE_LOADING)
+        self._act_edit.setEnabled(state in (STATE_STOPPED, STATE_ERROR))
 
         if running:
             self._dot.setStyleSheet("color: #4ade80; font-size: 16px;")
