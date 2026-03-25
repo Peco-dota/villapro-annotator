@@ -804,3 +804,345 @@ class AugmentDialog(QDialog):
         self._run_btn.setEnabled(True)
         self._run_btn.setText("Run Augmentation")
         QMessageBox.critical(self, "Augmentation Error", f"Failed:\n{err}")
+
+
+# ── Batch Export Dialog ────────────────────────────────────────────────────────
+
+class BatchExportWorker(QObject):
+    progress = pyqtSignal(int, int)
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, project_paths: list, output_dir: str,
+                 split: Optional[dict], generate_yaml: bool, aug_cfg):
+        super().__init__()
+        self.project_paths = project_paths
+        self.output_dir = output_dir
+        self.split = split
+        self.generate_yaml = generate_yaml
+        self.aug_cfg = aug_cfg
+
+    def run(self):
+        try:
+            from app.utils import batch_export_yolo
+            stats = batch_export_yolo(
+                self.project_paths, self.output_dir,
+                split=self.split,
+                generate_yaml=self.generate_yaml,
+                aug_cfg=self.aug_cfg,
+                progress_cb=lambda cur, tot: self.progress.emit(cur, tot),
+            )
+            self.finished.emit(stats)
+        except Exception as e:
+            import traceback
+            self.error.emit(traceback.format_exc())
+
+
+class BatchExportDialog(QDialog):
+    """Export + optionally augment multiple projects into one unified dataset."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Batch Export — Multiple Projects")
+        self.setStyleSheet(DIALOG_STYLE)
+        self.setMinimumWidth(560)
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        title = QLabel("Batch Export — Multiple Projects")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #a78bfa;")
+        layout.addWidget(title)
+
+        hint = QLabel(
+            "Add two or more .annotatex project files. All images and annotations\n"
+            "will be merged into one dataset with unified class IDs (matched by name)."
+        )
+        hint.setStyleSheet("color: #64748b; font-size: 11px;")
+        layout.addWidget(hint)
+
+        # ── Project list ──────────────────────────────────────────────────────
+        proj_grp = QGroupBox("Projects")
+        proj_layout = QVBoxLayout(proj_grp)
+
+        self._proj_list = QListWidget()
+        self._proj_list.setFixedHeight(130)
+        self._proj_list.setStyleSheet(
+            "QListWidget { background: #0f172a; color: #e2e8f0; "
+            "border: 1px solid #334155; border-radius: 4px; font-size: 11px; }"
+            "QListWidget::item:selected { background: #334155; }"
+        )
+        proj_layout.addWidget(self._proj_list)
+
+        btn_row = QHBoxLayout()
+        add_btn = QPushButton("Add Project…")
+        add_btn.clicked.connect(self._add_projects)
+        remove_btn = QPushButton("Remove Selected")
+        remove_btn.clicked.connect(self._remove_selected)
+        self._proj_count_lbl = QLabel("0 projects")
+        self._proj_count_lbl.setStyleSheet("color: #64748b; font-size: 10px;")
+        btn_row.addWidget(add_btn)
+        btn_row.addWidget(remove_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(self._proj_count_lbl)
+        proj_layout.addLayout(btn_row)
+        layout.addWidget(proj_grp)
+
+        # ── Split options ─────────────────────────────────────────────────────
+        split_grp = QGroupBox("Train / Val / Test Split")
+        split_form = QFormLayout(split_grp)
+        split_form.setSpacing(4)
+
+        self._split_cb = QCheckBox("Enable split")
+        self._split_cb.setChecked(True)
+        self._split_cb.toggled.connect(self._on_split_toggled)
+        split_form.addRow("", self._split_cb)
+
+        self._train_spin = QSpinBox()
+        self._train_spin.setRange(1, 98)
+        self._train_spin.setValue(80)
+        self._train_spin.setSuffix("%")
+        split_form.addRow("Train:", self._train_spin)
+
+        self._val_spin = QSpinBox()
+        self._val_spin.setRange(1, 49)
+        self._val_spin.setValue(10)
+        self._val_spin.setSuffix("%")
+        split_form.addRow("Val:", self._val_spin)
+
+        self._test_spin = QSpinBox()
+        self._test_spin.setRange(0, 49)
+        self._test_spin.setValue(10)
+        self._test_spin.setSuffix("%")
+        split_form.addRow("Test:", self._test_spin)
+
+        self._yaml_cb = QCheckBox("Generate data.yaml (YOLOv8)")
+        self._yaml_cb.setChecked(True)
+        split_form.addRow("", self._yaml_cb)
+        layout.addWidget(split_grp)
+
+        # ── Augmentation toggle ───────────────────────────────────────────────
+        aug_grp = QGroupBox("Augmentation (optional)")
+        aug_top = QVBoxLayout(aug_grp)
+
+        self._aug_cb = QCheckBox("Enable augmentation")
+        self._aug_cb.setChecked(False)
+        self._aug_cb.toggled.connect(self._on_aug_toggled)
+        aug_top.addWidget(self._aug_cb)
+
+        # Inner scroll area for aug options
+        self._aug_widget = QWidget()
+        aug_inner = QFormLayout(self._aug_widget)
+        aug_inner.setSpacing(5)
+
+        self._flip_h = QCheckBox("Horizontal flip")
+        self._flip_h.setChecked(True)
+        aug_inner.addRow("Flip:", self._flip_h)
+
+        self._flip_v = QCheckBox("Vertical flip")
+        aug_inner.addRow("", self._flip_v)
+
+        self._brightness_cb = QCheckBox("Brightness")
+        self._brightness_cb.setChecked(True)
+        aug_inner.addRow("Color:", self._brightness_cb)
+
+        self._contrast_cb = QCheckBox("Contrast")
+        self._contrast_cb.setChecked(True)
+        aug_inner.addRow("", self._contrast_cb)
+
+        self._saturation_cb = QCheckBox("Saturation")
+        self._saturation_cb.setChecked(True)
+        aug_inner.addRow("", self._saturation_cb)
+
+        self._rotation_cb = QCheckBox("Rotation ±")
+        self._rotation_deg = QSpinBox()
+        self._rotation_deg.setRange(1, 45)
+        self._rotation_deg.setValue(15)
+        self._rotation_deg.setSuffix("°")
+        rot_row = QHBoxLayout()
+        rot_row.addWidget(self._rotation_cb)
+        rot_row.addWidget(self._rotation_deg)
+        rot_row.addStretch()
+        aug_inner.addRow("Rotation:", rot_row)
+
+        self._copies_spin = QSpinBox()
+        self._copies_spin.setRange(1, 10)
+        self._copies_spin.setValue(2)
+        self._copies_spin.setSuffix(" per image")
+        aug_inner.addRow("Copies:", self._copies_spin)
+
+        self._only_annotated_cb = QCheckBox("Only augment annotated images")
+        self._only_annotated_cb.setChecked(True)
+        aug_inner.addRow("", self._only_annotated_cb)
+
+        self._include_originals_cb = QCheckBox("Include originals in output")
+        self._include_originals_cb.setChecked(True)
+        aug_inner.addRow("", self._include_originals_cb)
+
+        self._aug_widget.setVisible(False)
+        aug_top.addWidget(self._aug_widget)
+        layout.addWidget(aug_grp)
+
+        # ── Output directory ──────────────────────────────────────────────────
+        out_grp = QGroupBox("Output Directory")
+        out_layout = QHBoxLayout(out_grp)
+        self._out_edit = QLineEdit()
+        self._out_edit.setPlaceholderText("Select output folder…")
+        self._out_edit.setReadOnly(True)
+        out_layout.addWidget(self._out_edit)
+        browse_btn = QPushButton("Browse…")
+        browse_btn.clicked.connect(self._browse_output)
+        out_layout.addWidget(browse_btn)
+        layout.addWidget(out_grp)
+
+        # ── Progress ──────────────────────────────────────────────────────────
+        self._progress = QProgressBar()
+        self._progress.setVisible(False)
+        self._progress.setStyleSheet("""
+            QProgressBar {
+                background-color: #0f172a; border: 1px solid #334155;
+                border-radius: 4px; height: 16px;
+            }
+            QProgressBar::chunk { background-color: #7c3aed; border-radius: 3px; }
+        """)
+        layout.addWidget(self._progress)
+        self._status_lbl = QLabel("")
+        self._status_lbl.setStyleSheet("color: #64748b; font-size: 10px;")
+        layout.addWidget(self._status_lbl)
+
+        # ── Buttons ───────────────────────────────────────────────────────────
+        btns = QHBoxLayout()
+        btns.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btns.addWidget(cancel_btn)
+        self._run_btn = QPushButton("Export")
+        self._run_btn.setStyleSheet(PRIMARY_BTN)
+        self._run_btn.clicked.connect(self._run)
+        btns.addWidget(self._run_btn)
+        layout.addLayout(btns)
+
+    # ── Slots ─────────────────────────────────────────────────────────────────
+
+    def _on_split_toggled(self, checked: bool):
+        self._train_spin.setEnabled(checked)
+        self._val_spin.setEnabled(checked)
+        self._test_spin.setEnabled(checked)
+
+    def _on_aug_toggled(self, checked: bool):
+        self._aug_widget.setVisible(checked)
+        self.adjustSize()
+
+    def _add_projects(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select Project Files", "",
+            "AnnotateX Projects (*.annotatex);;All Files (*)"
+        )
+        existing = {self._proj_list.item(i).data(Qt.ItemDataRole.UserRole)
+                    for i in range(self._proj_list.count())}
+        for p in paths:
+            if p not in existing:
+                item = QListWidgetItem(os.path.basename(p))
+                item.setData(Qt.ItemDataRole.UserRole, p)
+                item.setToolTip(p)
+                self._proj_list.addItem(item)
+        self._update_count()
+
+    def _remove_selected(self):
+        for item in self._proj_list.selectedItems():
+            self._proj_list.takeItem(self._proj_list.row(item))
+        self._update_count()
+
+    def _update_count(self):
+        n = self._proj_list.count()
+        self._proj_count_lbl.setText(f"{n} project{'s' if n != 1 else ''}")
+
+    def _browse_output(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Output Directory")
+        if folder:
+            self._out_edit.setText(folder)
+
+    def _build_aug_config(self):
+        from app.augmentation import AugConfig
+        return AugConfig(
+            flip_horizontal=self._flip_h.isChecked(),
+            flip_vertical=self._flip_v.isChecked(),
+            brightness=self._brightness_cb.isChecked(),
+            contrast=self._contrast_cb.isChecked(),
+            saturation=self._saturation_cb.isChecked(),
+            rotation=self._rotation_cb.isChecked(),
+            rotation_degrees=float(self._rotation_deg.value()),
+            copies_per_image=self._copies_spin.value(),
+            only_annotated=self._only_annotated_cb.isChecked(),
+            output_original=self._include_originals_cb.isChecked(),
+        )
+
+    def _run(self):
+        project_paths = [
+            self._proj_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self._proj_list.count())
+        ]
+        if len(project_paths) < 2:
+            QMessageBox.warning(self, "Error", "Please add at least 2 project files.")
+            return
+        output_dir = self._out_edit.text().strip()
+        if not output_dir:
+            QMessageBox.warning(self, "Error", "Please select an output directory.")
+            return
+
+        split = None
+        if self._split_cb.isChecked():
+            t = self._train_spin.value() / 100
+            v = self._val_spin.value() / 100
+            e = self._test_spin.value() / 100
+            total = t + v + e
+            split = {"train": t / total, "val": v / total, "test": e / total}
+
+        aug_cfg = self._build_aug_config() if self._aug_cb.isChecked() else None
+
+        self._run_btn.setEnabled(False)
+        self._run_btn.setText("Exporting…")
+        self._progress.setVisible(True)
+        self._progress.setValue(0)
+        self._progress.setMaximum(100)
+
+        self._worker = BatchExportWorker(
+            project_paths, output_dir, split,
+            self._yaml_cb.isChecked(), aug_cfg
+        )
+        self._thread = QThread()
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.finished.connect(self._on_done)
+        self._worker.error.connect(self._on_error)
+        self._thread.start()
+
+    def _on_progress(self, current: int, total: int):
+        if total > 0:
+            self._progress.setMaximum(total)
+            self._progress.setValue(current)
+        self._status_lbl.setText(f"Processing image {current}/{total}…")
+
+    def _on_done(self, stats: dict):
+        self._thread.quit()
+        self._thread.wait()
+        msg = (
+            f"Batch export complete!\n\n"
+            f"Projects merged: {stats.get('projects', 0)}\n"
+            f"Original images: {stats.get('images', 0)}\n"
+            f"Augmented images: {stats.get('augmented', 0)}\n"
+            f"Total annotations: {stats.get('annotations', 0)}\n"
+            f"Unified classes: {stats.get('classes', 0)}"
+        )
+        QMessageBox.information(self, "Done", msg)
+        self.accept()
+
+    def _on_error(self, err: str):
+        self._thread.quit()
+        self._thread.wait()
+        self._run_btn.setEnabled(True)
+        self._run_btn.setText("Export")
+        QMessageBox.critical(self, "Batch Export Error", f"Export failed:\n{err}")

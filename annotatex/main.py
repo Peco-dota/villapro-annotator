@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AnnotateX - Professional YOLO Dataset Annotation Tool.
+"""AnnotateX - YOLO Dataset Annotation Tool.
 
 Entry point: shows welcome screen, then opens main window.
 """
@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QListWidget, QListWidgetItem,
     QFrame, QFileDialog, QMenu, QMessageBox,
 )
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont, QColor, QPalette, QIcon
 
 from app.utils import load_recent_projects, add_recent_project, remove_recent_project
@@ -89,6 +89,9 @@ class WelcomeScreen(QWidget):
     new_project_requested = pyqtSignal()
     open_project_requested = pyqtSignal()
     recent_project_requested = pyqtSignal(str)
+    batch_export_requested = pyqtSignal()
+    train_requested = pyqtSignal()
+    detect_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -96,6 +99,9 @@ class WelcomeScreen(QWidget):
         self.setStyleSheet(WELCOME_STYLE)
         self.setMinimumSize(700, 500)
         self._build_ui()
+        self._poll_timer = QTimer(self)
+        self._poll_timer.timeout.connect(self._update_service_indicator)
+        self._poll_timer.start(1000)
 
     def _build_ui(self):
         main = QHBoxLayout(self)
@@ -111,13 +117,13 @@ class WelcomeScreen(QWidget):
         left_layout.setSpacing(16)
 
         # Logo
-        logo = QLabel("◈ AnnotateX")
+        logo = QLabel("◈ VisionQ")
         logo.setStyleSheet(
             "color: #a78bfa; font-size: 28px; font-weight: bold; letter-spacing: 2px;"
         )
         left_layout.addWidget(logo)
 
-        tagline = QLabel("Professional YOLO Dataset\nAnnotation Tool")
+        tagline = QLabel("Object Detection Tool")
         tagline.setStyleSheet("color: #475569; font-size: 12px; line-height: 1.5;")
         left_layout.addWidget(tagline)
 
@@ -134,7 +140,49 @@ class WelcomeScreen(QWidget):
         open_btn.clicked.connect(self.open_project_requested)
         left_layout.addWidget(open_btn)
 
+        left_layout.addSpacing(8)
+
+        # Divider
+        div = QFrame()
+        div.setFrameShape(QFrame.Shape.HLine)
+        div.setStyleSheet("color: #1e293b;")
+        left_layout.addWidget(div)
+
+        left_layout.addSpacing(4)
+
+        # Batch export
+        batch_btn = QPushButton("  📦  Batch Export…")
+        batch_btn.clicked.connect(self.batch_export_requested)
+        left_layout.addWidget(batch_btn)
+
+        # Train
+        train_btn = QPushButton("  🚀  Train YOLO Model…")
+        train_btn.clicked.connect(self.train_requested)
+        left_layout.addWidget(train_btn)
+
+        # Detection service
+        detect_btn = QPushButton("  ⚡  Service Manager…")
+        detect_btn.clicked.connect(self.detect_requested)
+        left_layout.addWidget(detect_btn)
+
         left_layout.addStretch()
+
+        # Service indicator (clickable when running)
+        self._service_indicator = QPushButton("● Service stopped")
+        self._service_indicator.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                color: #334155;
+                font-size: 11px;
+                text-align: left;
+                padding: 0;
+            }
+            QPushButton:hover { color: #64748b; }
+        """)
+        self._service_indicator.setCursor(Qt.CursorShape.ArrowCursor)
+        self._service_indicator.clicked.connect(self.detect_requested)
+        left_layout.addWidget(self._service_indicator)
 
         # Version
         ver = QLabel("v1.0.0")
@@ -239,6 +287,37 @@ class WelcomeScreen(QWidget):
         elif action == delete_act:
             self._delete_project_file(path)
 
+    def _update_service_indicator(self):
+        from app.detection_service import get_registry
+        if get_registry().any_running():
+            self._service_indicator.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    border: none;
+                    color: #4ade80;
+                    font-size: 11px;
+                    text-align: left;
+                    padding: 0;
+                }
+                QPushButton:hover { color: #86efac; text-decoration: underline; }
+            """)
+            self._service_indicator.setText("● Service running  (click to manage)")
+            self._service_indicator.setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self._service_indicator.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    border: none;
+                    color: #334155;
+                    font-size: 11px;
+                    text-align: left;
+                    padding: 0;
+                }
+                QPushButton:hover { color: #64748b; }
+            """)
+            self._service_indicator.setText("● Service stopped")
+            self._service_indicator.setCursor(Qt.CursorShape.ArrowCursor)
+
     def _delete_project_file(self, path: str):
         name = os.path.basename(path)
         reply = QMessageBox.warning(
@@ -261,8 +340,8 @@ class WelcomeScreen(QWidget):
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("AnnotateX")
-    app.setOrganizationName("AnnotateX")
+    app.setApplicationName("VisionQ")
+    app.setOrganizationName("VisionQ")
 
     # Dark palette for native widgets
     palette = QPalette()
@@ -296,9 +375,10 @@ def main():
 
     def open_main(project: Project):
         nonlocal main_win
-        welcome.close()
+        welcome.hide()
         main_win = MainWindow()
         main_win._load_project(project)
+        main_win.home_requested.connect(lambda: welcome.show())
         main_win.showMaximized()
 
     def on_new_project():
@@ -347,10 +427,28 @@ def main():
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.critical(welcome, "Error", f"Failed to open project:\n{e}")
 
+    def on_batch_export():
+        from app.dialogs import BatchExportDialog
+        dlg = BatchExportDialog(welcome)
+        dlg.exec()
+
+    def on_train():
+        from app.train_dialog import TrainDialog
+        dlg = TrainDialog(welcome)
+        dlg.exec()
+
+    def on_detect():
+        from app.detection_dialog import DetectionDialog
+        dlg = DetectionDialog(welcome)
+        dlg.exec()
+
     welcome = WelcomeScreen()
     welcome.new_project_requested.connect(on_new_project)
     welcome.open_project_requested.connect(on_open_project)
     welcome.recent_project_requested.connect(on_recent_project)
+    welcome.batch_export_requested.connect(on_batch_export)
+    welcome.train_requested.connect(on_train)
+    welcome.detect_requested.connect(on_detect)
 
     # If a project path was passed as CLI arg, open directly
     if len(sys.argv) > 1 and sys.argv[1].endswith(".annotatex"):

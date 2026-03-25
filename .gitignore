@@ -42,3 +42,10 @@ output/
 # Test images / temp data
 test_images/
 temp/
+
+yolo26n.pt
+yolo26m.pt
+yolo26l.pt
+yolo26s.pt
+
+/runs/

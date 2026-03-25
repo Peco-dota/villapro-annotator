@@ -54,6 +54,7 @@ class AnnotateXToolbar(QWidget):
     """Custom toolbar widget (not QToolBar) for full style control."""
 
     # Signals
+    go_home = pyqtSignal()
     tool_select = pyqtSignal()
     tool_draw = pyqtSignal()
     zoom_in = pyqtSignal()
@@ -65,6 +66,8 @@ class AnnotateXToolbar(QWidget):
     save = pyqtSignal()
     export = pyqtSignal()
     augment = pyqtSignal()
+    train = pyqtSignal()
+    detect = pyqtSignal()
     prev_image = pyqtSignal()
     next_image = pyqtSignal()
 
@@ -79,8 +82,14 @@ class AnnotateXToolbar(QWidget):
         layout.setContentsMargins(12, 0, 12, 0)
         layout.setSpacing(4)
 
+        # Back to welcome
+        back_btn = _make_icon_btn("←", "Back to Welcome Screen")
+        back_btn.clicked.connect(self.go_home)
+        layout.addWidget(back_btn)
+        layout.addWidget(_sep())
+
         # Logo / app name
-        logo = QLabel("◈ AnnotateX")
+        logo = QLabel("◈ VisionQ")
         logo.setStyleSheet(
             "color: #a78bfa; font-size: 16px; font-weight: bold; "
             "letter-spacing: 1px; padding-right: 12px;"
@@ -189,6 +198,76 @@ class AnnotateXToolbar(QWidget):
         augment_btn.setToolTip("Augment Dataset")
         augment_btn.clicked.connect(self.augment)
         layout.addWidget(augment_btn)
+
+        train_btn = QPushButton("▶  Train")
+        train_btn.setFixedHeight(BTN_SIZE)
+        train_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #b45309;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 0 14px;
+            }
+            QPushButton:hover { background-color: #d97706; }
+            QPushButton:pressed { background-color: #92400e; }
+        """)
+        train_btn.setToolTip("Train YOLO Model")
+        train_btn.clicked.connect(self.train)
+        layout.addWidget(train_btn)
+
+        self._detect_btn = QPushButton("⚡  Service Manager")
+        self._detect_btn.setFixedHeight(BTN_SIZE)
+        self._detect_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0e7490;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 0 14px;
+            }
+            QPushButton:hover { background-color: #0891b2; }
+            QPushButton:pressed { background-color: #0c4a6e; }
+        """)
+        self._detect_btn.setToolTip("Service Manager")
+        self._detect_btn.clicked.connect(self.detect)
+        layout.addWidget(self._detect_btn)
+
+    def set_detection_running(self, running: bool):
+        """Update detect button appearance based on service state."""
+        if running:
+            self._detect_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #166534;
+                    color: #4ade80;
+                    border: 1px solid #4ade80;
+                    border-radius: 6px;
+                    font-size: 12px;
+                    font-weight: bold;
+                    padding: 0 14px;
+                }
+                QPushButton:hover { background-color: #15803d; }
+            """)
+            self._detect_btn.setText("⚡  Service Manager ●")
+        else:
+            self._detect_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #0e7490;
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                    font-size: 12px;
+                    font-weight: bold;
+                    padding: 0 14px;
+                }
+                QPushButton:hover { background-color: #0891b2; }
+                QPushButton:pressed { background-color: #0c4a6e; }
+            """)
+            self._detect_btn.setText("⚡  Service Manager")
 
     def set_tool(self, tool: str):
         if tool == "select":

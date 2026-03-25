@@ -19,8 +19,12 @@ from app.sidebar_images import ImageSidebar
 from app.sidebar_classes import ClassesSidebar
 from app.toolbar import AnnotateXToolbar
 from app.dialogs import (
-    ClassAssignDialog, ExportDialog, SettingsDialog, NewProjectDialog, AugmentDialog
+    ClassAssignDialog, ExportDialog, SettingsDialog, NewProjectDialog,
+    AugmentDialog, BatchExportDialog,
 )
+from app.train_dialog import TrainDialog
+from app.detection_dialog import DetectionDialog
+from app.detection_service import get_registry
 from app.utils import add_recent_project, remove_recent_project
 
 
@@ -59,13 +63,15 @@ MAIN_STYLE = """
 
 
 class MainWindow(QMainWindow):
+    home_requested = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._project: Optional[Project] = None
         self._auto_save_counter: int = 0
         self._space_pressed: bool = False
 
-        self.setWindowTitle("AnnotateX")
+        self.setWindowTitle("VisionQ")
         self.setMinimumSize(1200, 700)
         self.setStyleSheet(MAIN_STYLE)
 
@@ -110,6 +116,18 @@ class MainWindow(QMainWindow):
         self._act_augment = QAction("Augment Dataset…", self)
         self._act_augment.triggered.connect(self._show_augment)
         file_menu.addAction(self._act_augment)
+
+        self._act_batch_export = QAction("Batch Export (Multi-Project)…", self)
+        self._act_batch_export.triggered.connect(self._show_batch_export)
+        file_menu.addAction(self._act_batch_export)
+
+        self._act_train = QAction("Train YOLO Model…", self)
+        self._act_train.triggered.connect(self._show_train)
+        file_menu.addAction(self._act_train)
+
+        self._act_detect = QAction("Deploy & Detect…", self)
+        self._act_detect.triggered.connect(self._show_detection)
+        file_menu.addAction(self._act_detect)
 
         file_menu.addSeparator()
 
@@ -169,6 +187,7 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         # Toolbar
         self._toolbar = AnnotateXToolbar(self)
+        self._toolbar.go_home.connect(self._go_home)
         self._toolbar.tool_select.connect(lambda: self._set_tool("select"))
         self._toolbar.tool_draw.connect(lambda: self._set_tool("draw"))
         self._toolbar.zoom_in.connect(lambda: self._canvas.zoom_in() if self._canvas else None)
@@ -180,8 +199,15 @@ class MainWindow(QMainWindow):
         self._toolbar.save.connect(self.save_project)
         self._toolbar.export.connect(self._show_export)
         self._toolbar.augment.connect(self._show_augment)
+        self._toolbar.train.connect(self._show_train)
+        self._toolbar.detect.connect(self._show_detection)
         self._toolbar.prev_image.connect(self._prev_image)
         self._toolbar.next_image.connect(self._next_image)
+
+        # Poll detection service state to update toolbar button
+        self._detect_poll_timer = QTimer(self)
+        self._detect_poll_timer.timeout.connect(self._update_detect_btn)
+        self._detect_poll_timer.start(1000)
 
         # Central area
         central = QWidget()
@@ -342,7 +368,7 @@ class MainWindow(QMainWindow):
 
     def _load_project(self, project: Project):
         self._project = project
-        self.setWindowTitle(f"AnnotateX — {project.name}")
+        self.setWindowTitle(f"VisionQ — {project.name}")
 
         self._canvas.set_project(project)
         self._img_sidebar.load_project(project)
@@ -663,6 +689,10 @@ class MainWindow(QMainWindow):
         dlg = AugmentDialog(self._project, self)
         dlg.exec()
 
+    def _show_batch_export(self):
+        dlg = BatchExportDialog(self)
+        dlg.exec()
+
     def _delete_project_file(self):
         if not self._project or not self._project.path:
             QMessageBox.information(self, "Delete Project", "Project has not been saved to disk yet.")
@@ -687,6 +717,24 @@ class MainWindow(QMainWindow):
         self._project.path = None
         self._project.modified = False
         self._update_title()
+
+    def _show_train(self):
+        dlg = TrainDialog(self)
+        dlg.exec()
+
+    def _go_home(self):
+        if not self._confirm_unsaved():
+            return
+        self.home_requested.emit()
+        self.close()
+
+    def _show_detection(self):
+        dlg = DetectionDialog(self)
+        dlg.exec()
+        self._update_detect_btn()
+
+    def _update_detect_btn(self):
+        self._toolbar.set_detection_running(get_registry().any_running())
 
     def _show_settings(self):
         if not self._project:

@@ -212,6 +212,178 @@ def export_coco(project, output_dir: str) -> dict:
             "classes": len(project.classes)}
 
 
+# ── Batch (multi-project) YOLO Export ────────────────────────────────────────
+
+def batch_export_yolo(project_paths: list[str], output_dir: str,
+                      split: Optional[dict] = None,
+                      generate_yaml: bool = True,
+                      aug_cfg=None,
+                      progress_cb=None) -> dict:
+    """
+    Load multiple .annotatex projects, merge them with unified class IDs
+    (matched by name), then export as one YOLO dataset.
+
+    project_paths : list of .annotatex file paths
+    split         : {"train": 0.8, "val": 0.1, "test": 0.1} or None
+    aug_cfg       : AugConfig or None — if set, augmented copies are written
+                    alongside originals
+    progress_cb   : callable(current, total) for progress updates
+    """
+    from app.project import Project
+    from app.annotation import BoundingBox, ClassDef
+    import copy
+
+    output_dir = Path(output_dir)
+
+    # ── 1. Load all projects ──────────────────────────────────────────────────
+    projects: list[Project] = []
+    for p in project_paths:
+        proj = Project.load(p)
+        projects.append(proj)
+
+    # ── 2. Build unified class list (by name, order of first appearance) ──────
+    unified_names: list[str] = []
+    name_to_uid: dict[str, int] = {}
+    for proj in projects:
+        for cls in proj.classes:
+            if cls.name not in name_to_uid:
+                name_to_uid[cls.name] = len(unified_names)
+                unified_names.append(cls.name)
+
+    # ── 3. Collect all (image_path, boxes_remapped, stem) entries ────────────
+    # stem is used for the output filename; prefix with project index to avoid
+    # collisions when two projects have images with the same filename.
+    all_entries: list[tuple] = []  # (abs_src, remapped_boxes, stem, suffix)
+
+    for pidx, proj in enumerate(projects):
+        # Build per-project class id → unified id map
+        remap: dict[int, int] = {}
+        for cls in proj.classes:
+            remap[cls.id] = name_to_uid[cls.name]
+
+        for fn in proj.images:
+            src = proj.image_path(fn)
+            if not os.path.exists(src):
+                continue
+            ia = proj.annotations.get(fn)
+            boxes = []
+            if ia:
+                for b in ia.boxes:
+                    nb = copy.deepcopy(b)
+                    nb.class_id = remap.get(b.class_id, b.class_id)
+                    boxes.append(nb)
+            stem = f"p{pidx}_{Path(fn).stem}"
+            suffix = Path(fn).suffix.lower() or ".jpg"
+            all_entries.append((src, boxes, stem, suffix))
+
+    # ── 4. Split ──────────────────────────────────────────────────────────────
+    if split:
+        splits = list(split.keys())
+        ratios = list(split.values())
+        random.seed(42)
+        random.shuffle(all_entries)
+        partitions: dict[str, list] = {}
+        idx = 0
+        for i, sp in enumerate(splits):
+            if i == len(splits) - 1:
+                partitions[sp] = all_entries[idx:]
+            else:
+                count = int(len(all_entries) * ratios[i])
+                partitions[sp] = all_entries[idx:idx + count]
+                idx += count
+    else:
+        partitions = {"images": all_entries}
+
+    # ── 5. Write files ────────────────────────────────────────────────────────
+    from PIL import Image as PILImage
+    import numpy as np
+
+    stats = {"images": 0, "augmented": 0, "annotations": 0,
+             "classes": len(unified_names), "projects": len(projects)}
+
+    total_entries = len(all_entries)
+    done = 0
+
+    rng = random.Random(42)
+
+    for sp, entries in partitions.items():
+        if split:
+            img_out = output_dir / sp / "images"
+            lbl_out = output_dir / sp / "labels"
+        else:
+            img_out = output_dir / "images"
+            lbl_out = output_dir / "labels"
+        img_out.mkdir(parents=True, exist_ok=True)
+        lbl_out.mkdir(parents=True, exist_ok=True)
+
+        for src, boxes, stem, suffix in entries:
+            if progress_cb:
+                progress_cb(done, total_entries)
+            done += 1
+
+            out_fn = stem + suffix
+
+            # Copy / save original
+            pil_img = None
+            try:
+                if aug_cfg is not None:
+                    pil_img = PILImage.open(src).convert("RGB")
+                    if aug_cfg.output_original:
+                        pil_img.save(img_out / out_fn)
+                        _write_label_batch(lbl_out / (stem + ".txt"), boxes)
+                        stats["images"] += 1
+                        stats["annotations"] += len(boxes)
+                else:
+                    shutil.copy2(src, img_out / out_fn)
+                    _write_label_batch(lbl_out / (stem + ".txt"), boxes)
+                    stats["images"] += 1
+                    stats["annotations"] += len(boxes)
+            except Exception:
+                continue
+
+            # Augmented copies
+            if aug_cfg is not None and (not aug_cfg.only_annotated or boxes):
+                try:
+                    if pil_img is None:
+                        pil_img = PILImage.open(src).convert("RGB")
+                    from app.augmentation import _apply_single
+                    variants = _apply_single(pil_img, boxes, aug_cfg, rng)
+                    for j, (aug_img, aug_boxes) in enumerate(variants):
+                        aug_stem = f"{stem}_aug{j + 1}"
+                        aug_img.save(img_out / (aug_stem + suffix), quality=95)
+                        _write_label_batch(lbl_out / (aug_stem + ".txt"), aug_boxes)
+                        stats["augmented"] += 1
+                        stats["annotations"] += len(aug_boxes)
+                except Exception:
+                    pass
+
+    if progress_cb:
+        progress_cb(total_entries, total_entries)
+
+    # ── 6. classes.txt ────────────────────────────────────────────────────────
+    with open(output_dir / "classes.txt", "w") as f:
+        for name in unified_names:
+            f.write(name + "\n")
+
+    # ── 7. data.yaml ─────────────────────────────────────────────────────────
+    if generate_yaml and split:
+        yaml_path = output_dir / "data.yaml"
+        with open(yaml_path, "w") as f:
+            f.write(f"path: {output_dir.resolve()}\n")
+            for sp in splits:
+                f.write(f"{sp}: {sp}/images\n")
+            f.write(f"\nnc: {len(unified_names)}\n")
+            f.write(f"names: {unified_names}\n")
+
+    return stats
+
+
+def _write_label_batch(path: Path, boxes: list):
+    with open(path, "w") as f:
+        for b in boxes:
+            f.write(b.to_yolo_line() + "\n")
+
+
 # ── Recent projects ───────────────────────────────────────────────────────────
 
 RECENT_PROJECTS_FILE = Path.home() / ".annotatex_recent.json"
