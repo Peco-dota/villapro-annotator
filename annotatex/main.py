@@ -5,6 +5,9 @@ Entry point: shows welcome screen, then opens main window.
 """
 import sys
 import os
+import logging
+
+log = logging.getLogger("visionq")
 
 # Ensure 'app' imports resolve correctly
 sys.path.insert(0, os.path.dirname(__file__))
@@ -442,6 +445,13 @@ def main():
         dlg = DetectionDialog(welcome)
         dlg.exec()
 
+    # Graceful shutdown — stop all detection services before Qt tears down
+    def _on_quit():
+        from app.detection_service import get_registry
+        get_registry().stop_all()
+
+    app.aboutToQuit.connect(_on_quit)
+
     welcome = WelcomeScreen()
     welcome.new_project_requested.connect(on_new_project)
     welcome.open_project_requested.connect(on_open_project)
@@ -449,6 +459,12 @@ def main():
     welcome.batch_export_requested.connect(on_batch_export)
     welcome.train_requested.connect(on_train)
     welcome.detect_requested.connect(on_detect)
+
+    # Auto-start services marked for auto-start
+    from app.detection_service import get_registry
+    get_registry().auto_start_services(
+        lambda name, err: log.warning(f"Auto-start failed for '{name}': {err}") if err else None
+    )
 
     # If a project path was passed as CLI arg, open directly
     if len(sys.argv) > 1 and sys.argv[1].endswith(".annotatex"):
