@@ -43,9 +43,5 @@ output/
 test_images/
 temp/
 
-yolo26n.pt
-yolo26m.pt
-yolo26l.pt
-yolo26s.pt
 
 /runs/
