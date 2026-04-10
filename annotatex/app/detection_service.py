@@ -1,9 +1,11 @@
 """Real-time detection service for VisionQ.
 
-Runs a Flask HTTP server in a background thread.
-Accepts POST /detect with multipart form-data (3-5 images).
-Runs YOLO inference, determines car direction, pushes result to output IP.
-Multiple named service instances can run simultaneously on different ports.
+Two input modes:
+  HTTP — Runs a Flask HTTP server. Accepts POST /detect with multipart form-data (3-5 images).
+  RTSP — Connects to an IP camera via RTSP, pulls frames continuously.
+
+In both modes YOLO inference is run, direction is determined, and results are pushed
+to the configured output URL.  Multiple named service instances can run simultaneously.
 """
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ import json
 import os
 import socket
 import threading
+import time
 import logging
 from collections import deque
 from dataclasses import dataclass, asdict, field
@@ -20,14 +23,11 @@ from typing import Optional, Callable
 
 import numpy as np
 import requests
-from flask import Flask, request, jsonify
 from PIL import Image
 
 log = logging.getLogger("detection_service")
 
 _PERSIST_PATH = os.path.expanduser("~/.visionq_services.json")
-
-# Max request log entries kept per service
 _MAX_LOG = 50
 
 
@@ -37,14 +37,31 @@ _MAX_LOG = 50
 class ServiceConfig:
     name: str
     model_path: str
+    # HTTP listen (used when rtsp_enabled=False)
     input_host: str
     input_port: int
+    # Result push destination (both modes)
     output_host: str
     output_port: int
     auto_start: bool = False
+    # RTSP source (used when rtsp_enabled=True)
+    rtsp_enabled: bool = False
+    rtsp_user: str = ""
+    rtsp_password: str = ""
+    rtsp_ip: str = ""
+    rtsp_port: int = 554
+    rtsp_channel: str = "Streaming/Channels/102"
+    rtsp_interval: float = 0.5   # seconds between frame grabs
+
+    @property
+    def rtsp_url(self) -> str:
+        auth = f"{self.rtsp_user}:{self.rtsp_password}@" if self.rtsp_user else ""
+        channel = self.rtsp_channel.lstrip("/")
+        return f"rtsp://{auth}{self.rtsp_ip}:{self.rtsp_port}/{channel}"
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        return d
 
     @staticmethod
     def from_dict(d: dict) -> "ServiceConfig":
@@ -56,6 +73,13 @@ class ServiceConfig:
             output_host=d.get("output_host", "127.0.0.1"),
             output_port=d["output_port"],
             auto_start=d.get("auto_start", False),
+            rtsp_enabled=d.get("rtsp_enabled", False),
+            rtsp_user=d.get("rtsp_user", ""),
+            rtsp_password=d.get("rtsp_password", ""),
+            rtsp_ip=d.get("rtsp_ip", ""),
+            rtsp_port=d.get("rtsp_port", 554),
+            rtsp_channel=d.get("rtsp_channel", "Streaming/Channels/102"),
+            rtsp_interval=d.get("rtsp_interval", 0.5),
         )
 
 
@@ -79,7 +103,6 @@ def save_configs(configs: list[ServiceConfig]):
 # ── Port availability check ────────────────────────────────────────────────────
 
 def is_port_free(host: str, port: int) -> bool:
-    """Return True if the port is available to bind."""
     bind_host = "127.0.0.1" if host in ("0.0.0.0", "") else host
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -166,14 +189,15 @@ class LogEntry:
         )
 
 
-# ── Flask app factory ──────────────────────────────────────────────────────────
+# ── Flask app factory (HTTP mode) ──────────────────────────────────────────────
 
 def _make_flask_app(
     service_name: str,
     model_holder: dict,
     output_url: Optional[str],
     log_callback: Callable[[LogEntry], None],
-) -> Flask:
+):
+    from flask import Flask, request, jsonify
     app = Flask(f"detection_service_{service_name}")
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
@@ -231,8 +255,8 @@ def _make_flask_app(
         if output_url:
             try:
                 requests.post(output_url, json=payload, timeout=2)
-            except Exception as e:
-                log.warning(f"Failed to push to output: {e}")
+            except Exception:
+                pass  # output server not running — silently skip
 
         return jsonify(payload)
 
@@ -250,15 +274,14 @@ def _make_flask_app(
 
 # ── Service instance ────────────────────────────────────────────────────────────
 
-# States for the loading lifecycle
-STATE_STOPPED  = "stopped"
-STATE_LOADING  = "loading"   # model loading in background
-STATE_RUNNING  = "running"
-STATE_ERROR    = "error"
+STATE_STOPPED = "stopped"
+STATE_LOADING = "loading"
+STATE_RUNNING = "running"
+STATE_ERROR   = "error"
 
 
 class DetectionService:
-    """Manages a single running Flask detection server."""
+    """Manages a single detection service (HTTP or RTSP mode)."""
 
     def __init__(self):
         self._thread: Optional[threading.Thread] = None
@@ -269,7 +292,9 @@ class DetectionService:
         self._error_msg: str = ""
         self._request_log: deque[LogEntry] = deque(maxlen=_MAX_LOG)
         self._log_lock = threading.Lock()
-        # Called on UI thread via polling — just append to deque, UI polls
+        self._stop_event = threading.Event()
+        # Rolling buffer of bbox areas for direction tracking (RTSP mode)
+        self._area_buffer: deque[float] = deque(maxlen=8)
         self._on_state_change: Optional[Callable[[], None]] = None
 
     @property
@@ -301,11 +326,6 @@ class DetectionService:
             self._request_log.append(entry)
 
     def start_async(self, cfg: ServiceConfig, on_done: Callable[[str], None]):
-        """
-        Start loading the model and binding the server in a background thread.
-        on_done(error_str) is called when finished — empty string = success.
-        The UI should poll self.state to show a spinner while STATE_LOADING.
-        """
         if self._state == STATE_RUNNING:
             on_done("Service is already running.")
             return
@@ -316,6 +336,7 @@ class DetectionService:
         self._state = STATE_LOADING
         self._error_msg = ""
         self._config = cfg
+        self._area_buffer.clear()
 
         def _worker():
             error = self._do_start(cfg)
@@ -330,7 +351,13 @@ class DetectionService:
         t.start()
 
     def _do_start(self, cfg: ServiceConfig) -> str:
-        """Blocking start — runs in background thread. Returns error or ''."""
+        if cfg.rtsp_enabled:
+            return self._do_start_rtsp(cfg)
+        return self._do_start_http(cfg)
+
+    # ── HTTP mode ──────────────────────────────────────────────────────────────
+
+    def _do_start_http(self, cfg: ServiceConfig) -> str:
         try:
             from ultralytics import YOLO
             model = YOLO(cfg.model_path)
@@ -338,7 +365,10 @@ class DetectionService:
         except Exception as e:
             return f"Failed to load model: {e}"
 
-        output_url = f"http://{cfg.output_host}:{cfg.output_port}/result"
+        output_url = (
+            f"http://{cfg.output_host}:{cfg.output_port}/result"
+            if cfg.output_host.strip() else None
+        )
         app = _make_flask_app(cfg.name, self._model_holder, output_url, self._append_log)
 
         from werkzeug.serving import make_server
@@ -356,7 +386,119 @@ class DetectionService:
         self._thread.start()
         return ""
 
+    # ── RTSP mode ──────────────────────────────────────────────────────────────
+
+    def _do_start_rtsp(self, cfg: ServiceConfig) -> str:
+        try:
+            from ultralytics import YOLO
+            model = YOLO(cfg.model_path)
+            self._model_holder["model"] = model
+        except Exception as e:
+            return f"Failed to load model: {e}"
+
+        import cv2
+        # Force RTSP over TCP (same as ffplay -rtsp_transport tcp)
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+        rtsp_url = cfg.rtsp_url
+
+        # Test that the stream opens before returning success
+        cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+        if not cap.isOpened():
+            cap.release()
+            self._model_holder["model"] = None
+            return (
+                f"Cannot open RTSP stream.\n"
+                f"URL: {rtsp_url}\n\n"
+                f"Check credentials, IP address, port, and channel path."
+            )
+        cap.release()
+
+        output_url = (
+            f"http://{cfg.output_host}:{cfg.output_port}/result"
+            if cfg.output_host else None
+        )
+
+        self._stop_event.clear()
+
+        def _loop():
+            import cv2 as _cv2
+            _cap = _cv2.VideoCapture(rtsp_url, _cv2.CAP_FFMPEG)
+            consecutive_fails = 0
+
+            while not self._stop_event.is_set():
+                ret, frame = _cap.read()
+                if not ret:
+                    consecutive_fails += 1
+                    log.warning(f"[{cfg.name}] Frame read failed ({consecutive_fails}), reconnecting…")
+                    _cap.release()
+                    # Wait before reconnect, but respect stop signal
+                    if self._stop_event.wait(timeout=3.0):
+                        break
+                    _cap = _cv2.VideoCapture(rtsp_url, _cv2.CAP_FFMPEG)
+                    continue
+
+                consecutive_fails = 0
+                m = self._model_holder.get("model")
+                if m is None:
+                    break
+
+                try:
+                    results = m(frame, verbose=False)
+                    self._process_rtsp_frame(results, output_url, cfg.name)
+                except Exception as e:
+                    self._append_log(LogEntry.from_error(str(e)))
+
+                # Wait for next frame interval, exit early if stopped
+                self._stop_event.wait(timeout=cfg.rtsp_interval)
+
+            _cap.release()
+
+        self._thread = threading.Thread(target=_loop, daemon=True, name=f"RTSPThread-{cfg.name}")
+        self._thread.start()
+        return ""
+
+    def _process_rtsp_frame(self, results, output_url: Optional[str], service_name: str):
+        if not results:
+            return
+
+        result = results[0]
+        box = _largest_box(result)
+        car_detected = box is not None
+
+        if car_detected:
+            area = _bbox_area(box)
+            confidence = float(box.conf[0])
+            self._area_buffer.append(area)
+        else:
+            confidence = 0.0
+            self._area_buffer.clear()
+
+        direction = (
+            _determine_direction(list(self._area_buffer))
+            if len(self._area_buffer) >= 2 else "unknown"
+        )
+
+        payload = {
+            "service_name": service_name,
+            "car_detected": car_detected,
+            "direction": direction,
+            "confidence": round(confidence, 4),
+            "frames_analyzed": 1,
+            "frames_with_car": 1 if car_detected else 0,
+        }
+
+        self._append_log(LogEntry.from_result(payload))
+
+        if output_url:
+            try:
+                requests.post(output_url, json=payload, timeout=2)
+            except Exception:
+                pass  # output server not running — silently skip
+
+    # ── Stop ───────────────────────────────────────────────────────────────────
+
     def stop(self):
+        self._stop_event.set()
         if self._server:
             self._server.shutdown()
             self._server = None
@@ -364,23 +506,17 @@ class DetectionService:
         self._state = STATE_STOPPED
         self._error_msg = ""
         self._thread = None
+        self._area_buffer.clear()
 
 
 # ── Service registry ───────────────────────────────────────────────────────────
 
 class ServiceRegistry:
-    """
-    Manages multiple named DetectionService instances plus persistent configs.
-    Configs saved to ~/.visionq_services.json.
-    """
-
     def __init__(self):
         self._configs: list[ServiceConfig] = []
         self._services: dict[str, DetectionService] = {}
         self._lock = threading.Lock()
         self._load_configs()
-
-    # ── Config management ──────────────────────────────────────────────────────
 
     def _load_configs(self):
         self._configs = load_saved_configs()
@@ -417,8 +553,6 @@ class ServiceRegistry:
                     return c
         return None
 
-    # ── Runtime management ─────────────────────────────────────────────────────
-
     def get_service(self, name: str) -> Optional[DetectionService]:
         with self._lock:
             return self._services.get(name)
@@ -435,20 +569,15 @@ class ServiceRegistry:
             return any(s.is_running for s in self._services.values())
 
     def start_async(self, name: str, on_done: Callable[[str], None]) -> str:
-        """
-        Validate then kick off async start. Returns immediate error string if
-        validation fails, otherwise '' and on_done will be called when done.
-        """
         cfg = self.get_config(name)
         if cfg is None:
             return f"No config found for '{name}'."
 
-        # Validate model file exists
         if not os.path.isfile(cfg.model_path):
             return f"Model file not found:\n{cfg.model_path}"
 
-        # Check port availability
-        if not is_port_free(cfg.input_host, cfg.input_port):
+        # Port check only for HTTP mode
+        if not cfg.rtsp_enabled and not is_port_free(cfg.input_host, cfg.input_port):
             return (
                 f"Port {cfg.input_port} is already in use.\n"
                 f"Choose a different port or stop the process using it."
@@ -473,7 +602,6 @@ class ServiceRegistry:
 
     def restart_async(self, name: str, on_done: Callable[[str], None]) -> str:
         self.stop(name)
-        # Remove old service instance so a fresh one is created
         with self._lock:
             self._services.pop(name, None)
         return self.start_async(name, on_done)
@@ -486,7 +614,6 @@ class ServiceRegistry:
             svc.stop()
 
     def auto_start_services(self, on_done: Callable[[str, str], None]):
-        """Start all services marked auto_start. on_done(name, error) called per service."""
         for cfg in self.get_configs():
             if cfg.auto_start:
                 name = cfg.name
