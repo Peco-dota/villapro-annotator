@@ -14,7 +14,7 @@ from typing import Optional
 
 log = logging.getLogger("result_receiver")
 
-_MAX_RESULTS = 200
+# _MAX_RESULTS = 200
 
 _HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -122,7 +122,7 @@ class ResultReceiver:
     """Lightweight Flask server that receives and displays detection results."""
 
     def __init__(self):
-        self._results: deque[dict] = deque(maxlen=_MAX_RESULTS)
+        self._results: deque[dict] = deque()
         self._lock = threading.Lock()
         self._server = None
         self._thread: Optional[threading.Thread] = None

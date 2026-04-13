@@ -29,6 +29,21 @@ log = logging.getLogger("detection_service")
 
 _PERSIST_PATH = os.path.expanduser("~/.visionq_services.json")
 _MAX_LOG = 50
+_FRAMES_DIR = os.path.expanduser("C:/Skola/villapro-annotator/annotatex/app/frames")
+
+
+def _save_detection_frame(frame_np, service_name: str, car_detected: bool):
+    """Save a frame that went through detection to C:/Skola/villapro-annotator/annotatex/app/frames/<service_name>/."""
+    try:
+        import cv2
+        label = "car" if car_detected else "nocar"
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        folder = os.path.join(_FRAMES_DIR, service_name)
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, f"{ts}_{label}.jpg")
+        cv2.imwrite(path, frame_np)
+    except Exception as e:
+        log.warning(f"Failed to save detection frame: {e}")
 
 
 # ── Config dataclass ────────────────────────────────────────────────────────────
@@ -229,14 +244,23 @@ def _make_flask_app(
 
             results = model(img_np, verbose=False)
             if not results:
+                _save_detection_frame(
+                    img_np[:, :, ::-1],  # RGB→BGR for cv2
+                    service_name, False,
+                )
                 continue
 
             result = results[0]
             box = _largest_box(result)
-            if box is not None:
+            frame_has_car = box is not None
+            if frame_has_car:
                 car_detected = True
                 areas.append(_bbox_area(box))
                 confidences.append(float(box.conf[0]))
+            _save_detection_frame(
+                img_np[:, :, ::-1],  # RGB→BGR for cv2
+                service_name, frame_has_car,
+            )
 
         direction = _determine_direction(areas) if car_detected else "unknown"
         avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
@@ -444,7 +468,7 @@ class DetectionService:
 
                 try:
                     results = m(frame, verbose=False)
-                    self._process_rtsp_frame(results, output_url, cfg.name)
+                    self._process_rtsp_frame(results, frame, output_url, cfg.name)
                 except Exception as e:
                     self._append_log(LogEntry.from_error(str(e)))
 
@@ -457,13 +481,14 @@ class DetectionService:
         self._thread.start()
         return ""
 
-    def _process_rtsp_frame(self, results, output_url: Optional[str], service_name: str):
+    def _process_rtsp_frame(self, results, frame, output_url: Optional[str], service_name: str):
         if not results:
             return
 
         result = results[0]
         box = _largest_box(result)
         car_detected = box is not None
+        _save_detection_frame(frame, service_name, car_detected)
 
         if car_detected:
             area = _bbox_area(box)
