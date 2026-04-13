@@ -206,11 +206,11 @@ class ServiceConfigDialog(QDialog):
         rtsp_form.addRow("Channel path:", self._rtsp_channel)
 
         self._rtsp_interval = QDoubleSpinBox()
-        self._rtsp_interval.setRange(0.1, 10.0)
-        self._rtsp_interval.setSingleStep(0.1)
-        self._rtsp_interval.setDecimals(1)
+        self._rtsp_interval.setRange(0.05, 10.0)
+        self._rtsp_interval.setSingleStep(0.05)
+        self._rtsp_interval.setDecimals(2)
         self._rtsp_interval.setSuffix(" s")
-        self._rtsp_interval.setValue(cfg.rtsp_interval if cfg else 0.5)
+        self._rtsp_interval.setValue(cfg.rtsp_interval if cfg else 0.25)
         rtsp_form.addRow("Frame interval:", self._rtsp_interval)
 
         # URL preview
@@ -251,6 +251,49 @@ class ServiceConfigDialog(QDialog):
 
         layout.addWidget(output_group)
 
+        # ── Detection settings group ───────────────────────────────────────────
+        det_group = QGroupBox("Detection Settings")
+        det_group.setStyleSheet(_BASE)
+        det_form = QFormLayout(det_group)
+        det_form.setSpacing(8)
+        det_form.setContentsMargins(10, 14, 10, 10)
+        det_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self._conf_threshold = QDoubleSpinBox()
+        self._conf_threshold.setRange(0.01, 1.0)
+        self._conf_threshold.setSingleStep(0.05)
+        self._conf_threshold.setDecimals(2)
+        self._conf_threshold.setValue(cfg.conf_threshold if cfg else 0.5)
+        det_form.addRow("Confidence threshold:", self._conf_threshold)
+
+        self._report_only_with_direction = QCheckBox(
+            "Report only when car detected with known direction"
+        )
+        self._report_only_with_direction.setChecked(
+            cfg.report_only_with_direction if cfg else False
+        )
+        det_form.addRow("", self._report_only_with_direction)
+
+        self._save_frames = QCheckBox("Save frames locally")
+        self._save_frames.setChecked(cfg.save_frames if cfg else True)
+        self._save_frames.toggled.connect(self._on_save_frames_toggled)
+        det_form.addRow("", self._save_frames)
+
+        frames_dir_row = QHBoxLayout()
+        from app.detection_service import _FRAMES_DIR
+        self._frames_dir = QLineEdit(cfg.frames_dir if cfg else _FRAMES_DIR)
+        self._frames_dir.setPlaceholderText("Folder for saved frames")
+        frames_dir_row.addWidget(self._frames_dir)
+        browse_frames = _btn("Browse", "#1e293b", "#334155", "#94a3b8", border_color="#334155")
+        browse_frames.setFixedWidth(70)
+        browse_frames.clicked.connect(self._browse_frames_dir)
+        frames_dir_row.addWidget(browse_frames)
+        det_form.addRow("Frames folder:", frames_dir_row)
+
+        self._on_save_frames_toggled(self._save_frames.isChecked())
+
+        layout.addWidget(det_group)
+
         # Auto-start
         self._auto_start = QCheckBox("Auto-start this service when VisionQ opens")
         self._auto_start.setChecked(cfg.auto_start if cfg else False)
@@ -274,6 +317,16 @@ class ServiceConfigDialog(QDialog):
     def _on_rtsp_toggled(self, checked: bool):
         self._http_widget.setVisible(not checked)
         self._rtsp_widget.setVisible(checked)
+
+    def _on_save_frames_toggled(self, checked: bool):
+        self._frames_dir.setEnabled(checked)
+
+    def _browse_frames_dir(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Frames Folder", self._frames_dir.text()
+        )
+        if folder:
+            self._frames_dir.setText(folder)
 
     def _update_url_preview(self):
         user = self._rtsp_user.text().strip()
@@ -332,6 +385,10 @@ class ServiceConfigDialog(QDialog):
             rtsp_port=self._rtsp_port.value(),
             rtsp_channel=self._rtsp_channel.text().strip().lstrip("/"),
             rtsp_interval=self._rtsp_interval.value(),
+            conf_threshold=self._conf_threshold.value(),
+            report_only_with_direction=self._report_only_with_direction.isChecked(),
+            save_frames=self._save_frames.isChecked(),
+            frames_dir=self._frames_dir.text().strip(),
         )
         self.accept()
 

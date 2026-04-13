@@ -32,13 +32,13 @@ _MAX_LOG = 50
 _FRAMES_DIR = os.path.expanduser("C:/Skola/villapro-annotator/annotatex/app/frames")
 
 
-def _save_detection_frame(frame_np, service_name: str, car_detected: bool):
-    """Save a frame that went through detection to C:/Skola/villapro-annotator/annotatex/app/frames/<service_name>/."""
+def _save_detection_frame(frame_np, service_name: str, car_detected: bool, frames_dir: str = _FRAMES_DIR):
+    """Save a frame to <frames_dir>/<service_name>/."""
     try:
         import cv2
         label = "car" if car_detected else "nocar"
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-        folder = os.path.join(_FRAMES_DIR, service_name)
+        folder = os.path.join(frames_dir, service_name)
         os.makedirs(folder, exist_ok=True)
         path = os.path.join(folder, f"{ts}_{label}.jpg")
         cv2.imwrite(path, frame_np)
@@ -66,7 +66,11 @@ class ServiceConfig:
     rtsp_ip: str = ""
     rtsp_port: int = 554
     rtsp_channel: str = "Streaming/Channels/102"
-    rtsp_interval: float = 0.5   # seconds between frame grabs
+    rtsp_interval: float = 0.25  # seconds between frame grabs (0.25 = 4 fps)
+    conf_threshold: float = 0.5
+    report_only_with_direction: bool = False
+    save_frames: bool = True
+    frames_dir: str = _FRAMES_DIR
 
     @property
     def rtsp_url(self) -> str:
@@ -95,6 +99,10 @@ class ServiceConfig:
             rtsp_port=d.get("rtsp_port", 554),
             rtsp_channel=d.get("rtsp_channel", "Streaming/Channels/102"),
             rtsp_interval=d.get("rtsp_interval", 0.5),
+            conf_threshold=d.get("conf_threshold", 0.5),
+            report_only_with_direction=d.get("report_only_with_direction", False),
+            save_frames=d.get("save_frames", True),
+            frames_dir=d.get("frames_dir", _FRAMES_DIR),
         )
 
 
@@ -211,6 +219,10 @@ def _make_flask_app(
     model_holder: dict,
     output_url: Optional[str],
     log_callback: Callable[[LogEntry], None],
+    conf_threshold: float = 0.5,
+    report_only_with_direction: bool = False,
+    save_frames: bool = True,
+    frames_dir: str = _FRAMES_DIR,
 ):
     from flask import Flask, request, jsonify
     app = Flask(f"detection_service_{service_name}")
@@ -242,12 +254,13 @@ def _make_flask_app(
                 log.warning(f"Failed to decode image: {e}")
                 continue
 
-            results = model(img_np, verbose=False)
+            results = model(img_np, conf=conf_threshold, verbose=False)
             if not results:
-                _save_detection_frame(
-                    img_np[:, :, ::-1],  # RGB→BGR for cv2
-                    service_name, False,
-                )
+                if save_frames:
+                    _save_detection_frame(
+                        img_np[:, :, ::-1],  # RGB→BGR for cv2
+                        service_name, False, frames_dir,
+                    )
                 continue
 
             result = results[0]
@@ -257,10 +270,11 @@ def _make_flask_app(
                 car_detected = True
                 areas.append(_bbox_area(box))
                 confidences.append(float(box.conf[0]))
-            _save_detection_frame(
-                img_np[:, :, ::-1],  # RGB→BGR for cv2
-                service_name, frame_has_car,
-            )
+            if save_frames:
+                _save_detection_frame(
+                    img_np[:, :, ::-1],  # RGB→BGR for cv2
+                    service_name, frame_has_car, frames_dir,
+                )
 
         direction = _determine_direction(areas) if car_detected else "unknown"
         avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
@@ -274,13 +288,17 @@ def _make_flask_app(
             "frames_with_car": len(areas),
         }
 
-        log_callback(LogEntry.from_result(payload))
-
-        if output_url:
-            try:
-                requests.post(output_url, json=payload, timeout=2)
-            except Exception:
-                pass  # output server not running — silently skip
+        should_report = (
+            not report_only_with_direction
+            or (car_detected and direction != "unknown")
+        )
+        if should_report:
+            log_callback(LogEntry.from_result(payload))
+            if output_url:
+                try:
+                    requests.post(output_url, json=payload, timeout=2)
+                except Exception:
+                    pass  # output server not running — silently skip
 
         return jsonify(payload)
 
@@ -367,6 +385,7 @@ class DetectionService:
             if error:
                 self._state = STATE_ERROR
                 self._error_msg = error
+                self._append_log(LogEntry.from_error(error))
             else:
                 self._state = STATE_RUNNING
             on_done(error)
@@ -393,7 +412,13 @@ class DetectionService:
             f"http://{cfg.output_host}:{cfg.output_port}/result"
             if cfg.output_host.strip() else None
         )
-        app = _make_flask_app(cfg.name, self._model_holder, output_url, self._append_log)
+        app = _make_flask_app(
+            cfg.name, self._model_holder, output_url, self._append_log,
+            conf_threshold=cfg.conf_threshold,
+            report_only_with_direction=cfg.report_only_with_direction,
+            save_frames=cfg.save_frames,
+            frames_dir=cfg.frames_dir,
+        )
 
         from werkzeug.serving import make_server
         try:
@@ -444,9 +469,17 @@ class DetectionService:
 
         self._stop_event.clear()
 
-        def _loop():
+        # Shared latest frame between reader and processing threads
+        latest: dict = {"frame": None, "ok": False}
+        latest_lock = threading.Lock()
+
+        def _reader():
+            """Continuously reads frames as fast as the stream delivers them.
+            Only the most recent frame is kept — old frames are discarded,
+            which prevents the processing thread from working on stale data."""
             import cv2 as _cv2
             _cap = _cv2.VideoCapture(rtsp_url, _cv2.CAP_FFMPEG)
+            _cap.set(_cv2.CAP_PROP_BUFFERSIZE, 1)
             consecutive_fails = 0
 
             while not self._stop_event.is_set():
@@ -455,40 +488,68 @@ class DetectionService:
                     consecutive_fails += 1
                     log.warning(f"[{cfg.name}] Frame read failed ({consecutive_fails}), reconnecting…")
                     _cap.release()
-                    # Wait before reconnect, but respect stop signal
+                    with latest_lock:
+                        latest["ok"] = False
                     if self._stop_event.wait(timeout=3.0):
                         break
                     _cap = _cv2.VideoCapture(rtsp_url, _cv2.CAP_FFMPEG)
+                    _cap.set(_cv2.CAP_PROP_BUFFERSIZE, 1)
                     continue
 
                 consecutive_fails = 0
+                with latest_lock:
+                    latest["frame"] = frame
+                    latest["ok"] = True
+
+            _cap.release()
+
+        def _loop():
+            """Processes the latest available frame at the configured interval."""
+            while not self._stop_event.is_set():
+                self._stop_event.wait(timeout=cfg.rtsp_interval)
+
+                with latest_lock:
+                    ok = latest["ok"]
+                    frame = latest["frame"]
+
+                if not ok or frame is None:
+                    continue
+
                 m = self._model_holder.get("model")
                 if m is None:
                     break
 
                 try:
-                    results = m(frame, verbose=False)
-                    self._process_rtsp_frame(results, frame, output_url, cfg.name)
+                    results = m(frame, conf=cfg.conf_threshold, verbose=False)
+                    self._process_rtsp_frame(
+                        results, frame, output_url, cfg.name,
+                        cfg.report_only_with_direction,
+                        cfg.save_frames, cfg.frames_dir,
+                    )
                 except Exception as e:
                     self._append_log(LogEntry.from_error(str(e)))
 
-                # Wait for next frame interval, exit early if stopped
-                self._stop_event.wait(timeout=cfg.rtsp_interval)
-
-            _cap.release()
+        reader_thread = threading.Thread(target=_reader, daemon=True, name=f"RTSPReader-{cfg.name}")
+        reader_thread.start()
 
         self._thread = threading.Thread(target=_loop, daemon=True, name=f"RTSPThread-{cfg.name}")
         self._thread.start()
         return ""
 
-    def _process_rtsp_frame(self, results, frame, output_url: Optional[str], service_name: str):
+    def _process_rtsp_frame(
+        self, results, frame, output_url: Optional[str], service_name: str,
+        report_only_with_direction: bool = False,
+        save_frames: bool = True,
+        frames_dir: str = _FRAMES_DIR,
+    ):
         if not results:
             return
 
         result = results[0]
         box = _largest_box(result)
         car_detected = box is not None
-        _save_detection_frame(frame, service_name, car_detected)
+        if save_frames:
+            _save_detection_frame(frame, service_name, car_detected, frames_dir)
 
         if car_detected:
             area = _bbox_area(box)
@@ -512,13 +573,25 @@ class DetectionService:
             "frames_with_car": 1 if car_detected else 0,
         }
 
-        self._append_log(LogEntry.from_result(payload))
+        should_report = (
+            not report_only_with_direction
+            or (car_detected and direction != "unknown")
+        )
+        if should_report:
+            self._append_log(LogEntry.from_result(payload))
+            if output_url:
+                threading.Thread(
+                    target=self._push_result,
+                    args=(output_url, payload),
+                    daemon=True,
+                ).start()
 
-        if output_url:
-            try:
-                requests.post(output_url, json=payload, timeout=2)
-            except Exception:
-                pass  # output server not running — silently skip
+    @staticmethod
+    def _push_result(url: str, payload: dict):
+        try:
+            requests.post(url, json=payload, timeout=2)
+        except Exception:
+            pass  # output server not running — silently skip
 
     # ── Stop ───────────────────────────────────────────────────────────────────
 
