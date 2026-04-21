@@ -33,6 +33,7 @@ python main.py /path/to/project.annotatex
 - **Undo/Redo** — full history stack per image
 - **Auto-save** — configurable interval
 - **Dark theme** — Roboflow-inspired dark UI
+- **RTSP demo recording** — optional per-service MP4 recording with inference overlays for customer demos
 
 ## Keyboard Shortcuts
 
