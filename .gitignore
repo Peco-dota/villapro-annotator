@@ -43,5 +43,31 @@ output/
 test_images/
 temp/
 
-
 /runs/
+
+# VisionQ — runtime-generated data (never commit these)
+# RTSP / video recordings (also covers the "recodings" typo in folder name)
+VisionQ_recordings/
+**/VisionQ_recordings/
+recordings/
+recodings/
+**/recodings/
+
+# Dataset capture frames (saved by detection service for later annotation)
+**/dataset_capture/
+dataset/
+*_dataset/
+*_dataset_labeled/
+frames_annotated/
+frames_dir/
+old_dataset/
+
+# YOLO / training outputs
+runs/
+weights/
+*_model_output/
+ultimate_model_output/
+*.pt
+*.onnx
+*.engine
+*.torchscript
