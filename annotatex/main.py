@@ -22,6 +22,7 @@ from PyQt6.QtGui import QFont, QColor, QPalette, QIcon
 
 from app.utils import load_recent_projects, add_recent_project, remove_recent_project
 from app.project import Project
+from app.version import VERSION
 
 
 WELCOME_STYLE = """
@@ -188,8 +189,8 @@ class WelcomeScreen(QWidget):
         left_layout.addWidget(self._service_indicator)
 
         # Version
-        ver = QLabel("v1.0.0")
-        ver.setStyleSheet("color: #1e293b; font-size: 10px;")
+        ver = QLabel(f"v{VERSION}")
+        ver.setStyleSheet("color: #475569; font-size: 10px;")
         left_layout.addWidget(ver)
 
         main.addWidget(left)

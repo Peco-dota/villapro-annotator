@@ -26,7 +26,7 @@ from app.train_dialog import TrainDialog
 from app.detection_dialog import DetectionDialog
 from app.detection_service import get_registry
 from app.utils import add_recent_project, remove_recent_project
-
+from app.version import VERSION
 
 MAIN_STYLE = """
     QMainWindow {
@@ -189,6 +189,12 @@ class MainWindow(QMainWindow):
         copy_prev_act.triggered.connect(self._copy_boxes_from_prev)
         edit_menu.addAction(copy_prev_act)
 
+        # Help
+        help_menu = mb.addMenu("Help")
+        about_act = QAction(f"About VisionQ…", self)
+        about_act.triggered.connect(self._show_about)
+        help_menu.addAction(about_act)
+
         # View
         view_menu = mb.addMenu("View")
         fit_act = QAction("Fit to Window", self)
@@ -305,6 +311,10 @@ class MainWindow(QMainWindow):
         sb.addWidget(self._status_boxes)
         sb.addWidget(self._make_status_sep())
         sb.addWidget(self._status_progress)
+
+        version_lbl = QLabel(f"v{VERSION}")
+        version_lbl.setStyleSheet("padding: 0 10px; color: #334155;")
+        sb.addPermanentWidget(version_lbl)
 
     def _make_status_sep(self) -> QLabel:
         sep = QLabel("|")
@@ -925,6 +935,16 @@ class MainWindow(QMainWindow):
 
     def _update_detect_btn(self):
         self._toolbar.set_detection_running(get_registry().any_running())
+
+    def _show_about(self):
+        QMessageBox.about(
+            self,
+            "About VisionQ",
+            f"<b>VisionQ</b><br>"
+            f"Version {VERSION}<br><br>"
+            "AI-powered annotation and detection tool.<br>"
+            "Built with YOLO + PyQt6.",
+        )
 
     def _show_settings(self):
         if not self._project:
