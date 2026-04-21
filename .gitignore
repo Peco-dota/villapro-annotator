@@ -68,6 +68,7 @@ weights/
 *_model_output/
 ultimate_model_output/
 *.pt
+!models/*.pt
 *.onnx
 *.engine
 *.torchscript
