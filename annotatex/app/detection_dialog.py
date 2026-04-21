@@ -7,10 +7,10 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QSpinBox, QDoubleSpinBox, QFileDialog, QFormLayout, QWidget,
     QScrollArea, QFrame, QMessageBox, QSizePolicy, QCheckBox,
-    QTextEdit, QMenu, QGroupBox,
+    QTextEdit, QMenu, QGroupBox, QSlider,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont, QAction
+from PyQt6.QtGui import QFont, QAction, QImage, QPixmap
 
 from app.detection_service import (
     get_registry, ServiceConfig,
@@ -103,22 +103,48 @@ def _btn(label: str, color: str, hover: str, text_color: str = "white",
 # ── Config dialog (add / edit / relaunch) ──────────────────────────────────────
 
 class ServiceConfigDialog(QDialog):
-    """Popup for entering or editing a service config."""
+    """Popup for entering, editing, or duplicating a service config."""
 
-    def __init__(self, cfg: ServiceConfig | None = None, parent=None):
+    def __init__(self, cfg: ServiceConfig | None = None, parent=None, is_duplicate: bool = False):
         super().__init__(parent)
         self.setWindowTitle("Configure Service")
         self.setMinimumWidth(480)
         self.setStyleSheet(_BASE)
         self._result_cfg: ServiceConfig | None = None
+        self._is_duplicate = is_duplicate
         self._build_ui(cfg)
 
     def _build_ui(self, cfg: ServiceConfig | None):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(14)
-        layout.setContentsMargins(20, 20, 20, 20)
+        # Outer layout: scrollable content + pinned button row
+        outer = QVBoxLayout(self)
+        outer.setSpacing(0)
+        outer.setContentsMargins(0, 0, 0, 0)
 
-        title = QLabel("New Service" if cfg is None else f"Edit — {cfg.name}")
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        _content = QWidget()
+        layout = QVBoxLayout(_content)
+        layout.setSpacing(14)
+        layout.setContentsMargins(20, 20, 20, 12)
+
+        scroll.setWidget(_content)
+        outer.addWidget(scroll, stretch=1)
+
+        # Limit dialog height to available screen so it never goes off-screen
+        from PyQt6.QtWidgets import QApplication
+        available = QApplication.primaryScreen().availableGeometry()
+        self.setMaximumHeight(available.height() - 40)
+
+        if self._is_duplicate:
+            title_text = f"Duplicate — {cfg.name}" if cfg else "Duplicate Service"
+        elif cfg is None:
+            title_text = "New Service"
+        else:
+            title_text = f"Edit — {cfg.name}"
+        title = QLabel(title_text)
         title.setStyleSheet("color: #a78bfa; font-size: 15px; font-weight: bold;")
         layout.addWidget(title)
 
@@ -126,10 +152,10 @@ class ServiceConfigDialog(QDialog):
         form.setSpacing(10)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # Name
+        # Name — editable for new and duplicate, locked for plain edit
         self._name = QLineEdit(cfg.name if cfg else "")
         self._name.setPlaceholderText("e.g. gate_1_in, gate_2_out…")
-        if cfg:
+        if cfg and not self._is_duplicate:
             self._name.setEnabled(False)
         form.addRow("Name:", self._name)
 
@@ -153,10 +179,18 @@ class ServiceConfigDialog(QDialog):
         input_layout.setSpacing(8)
         input_layout.setContentsMargins(10, 14, 10, 10)
 
+        input_mode = (cfg.input_mode if cfg and cfg.input_mode in ("http", "rtsp", "video")
+                      else ("rtsp" if cfg and cfg.rtsp_enabled else "http"))
+
         self._rtsp_chk = QCheckBox("Use RTSP camera stream (instead of HTTP endpoint)")
-        self._rtsp_chk.setChecked(cfg.rtsp_enabled if cfg else False)
+        self._rtsp_chk.setChecked(input_mode == "rtsp")
         self._rtsp_chk.toggled.connect(self._on_rtsp_toggled)
         input_layout.addWidget(self._rtsp_chk)
+
+        self._video_chk = QCheckBox("Use local video file as input (simulate live stream)")
+        self._video_chk.setChecked(input_mode == "video")
+        self._video_chk.toggled.connect(self._on_video_toggled)
+        input_layout.addWidget(self._video_chk)
 
         # HTTP section
         self._http_widget = QWidget()
@@ -228,6 +262,38 @@ class ServiceConfigDialog(QDialog):
         self._rtsp_port.valueChanged.connect(self._update_url_preview)
 
         input_layout.addWidget(self._rtsp_widget)
+
+        # Video-file section
+        self._video_widget = QWidget()
+        self._video_widget.setStyleSheet("background: transparent;")
+        video_form = QFormLayout(self._video_widget)
+        video_form.setSpacing(8)
+        video_form.setContentsMargins(0, 4, 0, 0)
+        video_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        video_row = QHBoxLayout()
+        self._video_path = QLineEdit(cfg.video_path if cfg else "")
+        self._video_path.setPlaceholderText("Select .mp4 / .avi / .mov video file…")
+        video_row.addWidget(self._video_path)
+        browse_video = _btn("Browse", "#1e293b", "#334155", "#94a3b8", border_color="#334155")
+        browse_video.setFixedWidth(70)
+        browse_video.clicked.connect(self._browse_video)
+        video_row.addWidget(browse_video)
+        video_form.addRow("Video file:", video_row)
+
+        self._video_interval = QDoubleSpinBox()
+        self._video_interval.setRange(0.05, 10.0)
+        self._video_interval.setSingleStep(0.05)
+        self._video_interval.setDecimals(2)
+        self._video_interval.setSuffix(" s")
+        self._video_interval.setValue(cfg.rtsp_interval if cfg else 0.25)
+        video_form.addRow("Frame interval:", self._video_interval)
+
+        self._video_loop = QCheckBox("Loop video when it ends")
+        self._video_loop.setChecked(cfg.video_loop if cfg else True)
+        video_form.addRow("", self._video_loop)
+
+        input_layout.addWidget(self._video_widget)
         layout.addWidget(input_group)
 
         # ── Output group ───────────────────────────────────────────────────────
@@ -266,40 +332,93 @@ class ServiceConfigDialog(QDialog):
         self._conf_threshold.setValue(cfg.conf_threshold if cfg else 0.5)
         det_form.addRow("Confidence threshold:", self._conf_threshold)
 
-        self._report_only_with_direction = QCheckBox(
-            "Report only when car detected with known direction"
+        self._strict_output = QCheckBox(
+            "Strict output: emit forward/idle/backward when car present, no_car when absent"
         )
-        self._report_only_with_direction.setChecked(
-            cfg.report_only_with_direction if cfg else False
+        self._strict_output.setChecked(cfg.strict_output if cfg else False)
+        det_form.addRow("", self._strict_output)
+
+        self._state_changes_only = QCheckBox(
+            "State changes only: emit once per transition (forward → idle → no_car…)"
         )
-        det_form.addRow("", self._report_only_with_direction)
-
-        self._save_frames = QCheckBox("Save frames locally")
-        self._save_frames.setChecked(cfg.save_frames if cfg else True)
-        self._save_frames.toggled.connect(self._on_save_frames_toggled)
-        det_form.addRow("", self._save_frames)
-
-        frames_dir_row = QHBoxLayout()
-        from app.detection_service import _FRAMES_DIR
-        self._frames_dir = QLineEdit(cfg.frames_dir if cfg else _FRAMES_DIR)
-        self._frames_dir.setPlaceholderText("Folder for saved frames")
-        frames_dir_row.addWidget(self._frames_dir)
-        browse_frames = _btn("Browse", "#1e293b", "#334155", "#94a3b8", border_color="#334155")
-        browse_frames.setFixedWidth(70)
-        browse_frames.clicked.connect(self._browse_frames_dir)
-        frames_dir_row.addWidget(browse_frames)
-        det_form.addRow("Frames folder:", frames_dir_row)
-
-        self._on_save_frames_toggled(self._save_frames.isChecked())
+        self._state_changes_only.setChecked(cfg.state_changes_only if cfg else False)
+        det_form.addRow("", self._state_changes_only)
 
         layout.addWidget(det_group)
 
-        # Auto-start
+        # ── Dataset capture group ──────────────────────────────────────────────
+        ds_group = QGroupBox("Dataset Capture")
+        ds_group.setStyleSheet(_BASE)
+        ds_form = QFormLayout(ds_group)
+        ds_form.setSpacing(8)
+        ds_form.setContentsMargins(10, 14, 10, 10)
+        ds_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self._dataset_capture = QCheckBox("Save raw frames for annotation")
+        self._dataset_capture.setChecked(cfg.dataset_capture if cfg else False)
+        self._dataset_capture.toggled.connect(self._on_dataset_capture_toggled)
+        ds_form.addRow("", self._dataset_capture)
+
+        self._dataset_interval = QSpinBox()
+        self._dataset_interval.setRange(1, 1000)
+        self._dataset_interval.setValue(cfg.dataset_interval if cfg else 10)
+        self._dataset_interval.setSuffix(" frames")
+        ds_form.addRow("Capture every:", self._dataset_interval)
+
+        ds_dir_row = QHBoxLayout()
+        self._dataset_dir = QLineEdit(cfg.dataset_dir if cfg else "")
+        self._dataset_dir.setPlaceholderText("Leave blank to use frames_dir/dataset/")
+        ds_dir_row.addWidget(self._dataset_dir)
+        browse_ds = _btn("Browse", "#1e293b", "#334155", "#94a3b8", border_color="#334155")
+        browse_ds.setFixedWidth(70)
+        browse_ds.clicked.connect(self._browse_dataset_dir)
+        ds_dir_row.addWidget(browse_ds)
+        ds_form.addRow("Output folder:", ds_dir_row)
+
+        self._on_dataset_capture_toggled(self._dataset_capture.isChecked())
+        layout.addWidget(ds_group)
+
+        # ── Stream recording group ───────────────────────────────────────────
+        rec_group = QGroupBox("Input Recording")
+        rec_group.setStyleSheet(_BASE)
+        rec_form = QFormLayout(rec_group)
+        rec_form.setSpacing(8)
+        rec_form.setContentsMargins(10, 14, 10, 10)
+        rec_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self._record_stream = QCheckBox("Auto-start raw recording to MP4 when service starts")
+        self._record_stream.setChecked(cfg.record_stream if cfg else False)
+        self._record_stream.toggled.connect(self._on_record_toggled)
+        rec_form.addRow("", self._record_stream)
+
+        fps_hint = QLabel("Recording FPS is set automatically from the frame interval above.")
+        fps_hint.setStyleSheet("color: #475569; font-size: 10px;")
+        rec_form.addRow("", fps_hint)
+
+        rec_dir_row = QHBoxLayout()
+        self._record_dir = QLineEdit(cfg.record_dir if cfg else "")
+        self._record_dir.setPlaceholderText("Leave blank to use ~/VisionQ_recordings/")
+        rec_dir_row.addWidget(self._record_dir)
+        browse_rec = _btn("Browse", "#1e293b", "#334155", "#94a3b8", border_color="#334155")
+        browse_rec.setFixedWidth(70)
+        browse_rec.clicked.connect(self._browse_record_dir)
+        rec_dir_row.addWidget(browse_rec)
+        rec_form.addRow("Output folder:", rec_dir_row)
+
+        self._record_group = rec_group
+        self._on_record_toggled(self._record_stream.isChecked())
+        layout.addWidget(rec_group)
+
+        # Auto-start (last item in scroll content)
         self._auto_start = QCheckBox("Auto-start this service when VisionQ opens")
         self._auto_start.setChecked(cfg.auto_start if cfg else False)
         layout.addWidget(self._auto_start)
 
-        btn_row = QHBoxLayout()
+        # Button row — outside the scroll, always visible at the bottom
+        btn_container = QWidget()
+        btn_container.setStyleSheet("background-color: #1a1a2e; border-top: 1px solid #1e293b;")
+        btn_row = QHBoxLayout(btn_container)
+        btn_row.setContentsMargins(20, 10, 20, 14)
         btn_row.addStretch()
         cancel = _btn("Cancel", "#1e293b", "#334155", "#94a3b8", border_color="#334155")
         cancel.clicked.connect(self.reject)
@@ -308,25 +427,69 @@ class ServiceConfigDialog(QDialog):
         ok = _btn("▶  Save & Start", "#7c3aed", "#6d28d9")
         ok.clicked.connect(self._accept)
         btn_row.addWidget(ok)
-        layout.addLayout(btn_row)
+        outer.addWidget(btn_container)
 
         # Initial state
-        self._on_rtsp_toggled(self._rtsp_chk.isChecked())
+        self._apply_input_mode()
+        self._on_record_toggled(self._record_stream.isChecked())
         self._update_url_preview()
 
     def _on_rtsp_toggled(self, checked: bool):
-        self._http_widget.setVisible(not checked)
-        self._rtsp_widget.setVisible(checked)
+        if checked and self._video_chk.isChecked():
+            self._video_chk.setChecked(False)
+            return
+        self._apply_input_mode()
 
-    def _on_save_frames_toggled(self, checked: bool):
-        self._frames_dir.setEnabled(checked)
+    def _on_video_toggled(self, checked: bool):
+        if checked and self._rtsp_chk.isChecked():
+            self._rtsp_chk.setChecked(False)
+            return
+        self._apply_input_mode()
 
-    def _browse_frames_dir(self):
+    def _current_input_mode(self) -> str:
+        if self._video_chk.isChecked():
+            return "video"
+        if self._rtsp_chk.isChecked():
+            return "rtsp"
+        return "http"
+
+    def _apply_input_mode(self):
+        mode = self._current_input_mode()
+        self._http_widget.setVisible(mode == "http")
+        self._rtsp_widget.setVisible(mode == "rtsp")
+        self._video_widget.setVisible(mode == "video")
+        self._record_group.setVisible(mode in ("rtsp", "video"))
+
+    def _on_dataset_capture_toggled(self, checked: bool):
+        self._dataset_interval.setEnabled(checked)
+        self._dataset_dir.setEnabled(checked)
+
+    def _on_record_toggled(self, checked: bool):
+        self._record_dir.setEnabled(checked)
+
+    def _browse_dataset_dir(self):
         folder = QFileDialog.getExistingDirectory(
-            self, "Select Frames Folder", self._frames_dir.text()
+            self, "Select Dataset Output Folder", self._dataset_dir.text()
         )
         if folder:
-            self._frames_dir.setText(folder)
+            self._dataset_dir.setText(folder)
+
+    def _browse_record_dir(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Video Recording Output Folder", self._record_dir.text()
+        )
+        if folder:
+            self._record_dir.setText(folder)
+
+    def _browse_video(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Input Video",
+            self._video_path.text(),
+            "Video Files (*.mp4 *.avi *.mov *.mkv);;All Files (*)",
+        )
+        if path:
+            self._video_path.setText(path)
 
     def _update_url_preview(self):
         user = self._rtsp_user.text().strip()
@@ -348,7 +511,7 @@ class ServiceConfigDialog(QDialog):
     def _accept(self):
         name = self._name.text().strip()
         model = self._model.text().strip()
-        rtsp = self._rtsp_chk.isChecked()
+        mode = self._current_input_mode()
 
         if not name:
             QMessageBox.warning(self, "Validation", "Service name is required.")
@@ -362,13 +525,24 @@ class ServiceConfigDialog(QDialog):
                                 f"Model file does not exist:\n{model}")
             return
 
-        if rtsp:
+        if mode == "rtsp":
             if not self._rtsp_ip.text().strip():
                 QMessageBox.warning(self, "Validation", "Camera IP address is required.")
                 return
             if not self._rtsp_user.text().strip():
                 QMessageBox.warning(self, "Validation", "Camera username is required.")
                 return
+
+        if mode == "video":
+            video_path = self._video_path.text().strip()
+            if not video_path:
+                QMessageBox.warning(self, "Validation", "Video file path is required for video input mode.")
+                return
+            if not os.path.isfile(video_path):
+                QMessageBox.warning(self, "Validation", f"Video file not found:\n{video_path}")
+                return
+
+        interval = self._rtsp_interval.value() if mode == "rtsp" else self._video_interval.value()
 
         self._result_cfg = ServiceConfig(
             name=name,
@@ -377,18 +551,25 @@ class ServiceConfigDialog(QDialog):
             input_port=self._in_port.value(),
             output_host=self._out_host.text().strip() or "127.0.0.1",
             output_port=self._out_port.value(),
+            input_mode=mode,
             auto_start=self._auto_start.isChecked(),
-            rtsp_enabled=rtsp,
+            rtsp_enabled=(mode == "rtsp"),
             rtsp_user=self._rtsp_user.text().strip(),
             rtsp_password=self._rtsp_pass.text(),
             rtsp_ip=self._rtsp_ip.text().strip(),
             rtsp_port=self._rtsp_port.value(),
             rtsp_channel=self._rtsp_channel.text().strip().lstrip("/"),
-            rtsp_interval=self._rtsp_interval.value(),
+            rtsp_interval=interval,
+            video_path=self._video_path.text().strip(),
+            video_loop=self._video_loop.isChecked(),
             conf_threshold=self._conf_threshold.value(),
-            report_only_with_direction=self._report_only_with_direction.isChecked(),
-            save_frames=self._save_frames.isChecked(),
-            frames_dir=self._frames_dir.text().strip(),
+            strict_output=self._strict_output.isChecked(),
+            state_changes_only=self._state_changes_only.isChecked(),
+            dataset_capture=self._dataset_capture.isChecked(),
+            dataset_interval=self._dataset_interval.value(),
+            dataset_dir=self._dataset_dir.text().strip(),
+            record_stream=self._record_stream.isChecked() and mode in ("rtsp", "video"),
+            record_dir=self._record_dir.text().strip(),
         )
         self.accept()
 
@@ -397,10 +578,240 @@ class ServiceConfigDialog(QDialog):
         return self._result_cfg
 
 
+# ── Live preview dialog ────────────────────────────────────────────────────────
+
+class PreviewDialog(QDialog):
+    """Floating window that displays annotated frames from a running service.
+
+    In video mode an extra controls bar is shown at the bottom with:
+      • rewind buttons (-5 s / -15 s)
+      • speed buttons (0.5× / 1× / 2× / 4×)
+      • a progress slider + current/total time label
+    """
+
+    closed = pyqtSignal()
+    # Seek buttons emit delta in seconds (negative = rewind, positive = forward)
+    seek_delta_requested = pyqtSignal(float)
+    # Slider release emits absolute position in ms
+    seek_to_ms_requested = pyqtSignal(float)
+    # Speed buttons
+    speed_requested = pyqtSignal(float)
+    # Pause / play toggle
+    pause_toggled = pyqtSignal()
+    # Step one frame while paused
+    step_frame_requested = pyqtSignal()
+
+    def __init__(self, service_name: str, is_video: bool = False, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Preview — {service_name}")
+        self.setStyleSheet("background: #0a0f1e;")
+        self.setMinimumSize(480, 320)
+        self.resize(800, 600)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # ── Video frame area ──────────────────────────────────────────────────
+        self._label = QLabel()
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._label.setStyleSheet("background: #0a0f1e; color: #334155;")
+        self._label.setText("Waiting for first frame…")
+        layout.addWidget(self._label, stretch=1)
+
+        # ── Controls bar (video mode only) ───────────────────────────────────
+        self._controls = QWidget()
+        self._controls.setStyleSheet("background: #0f172a; border-top: 1px solid #1e293b;")
+        ctrl = QVBoxLayout(self._controls)
+        ctrl.setContentsMargins(12, 8, 12, 10)
+        ctrl.setSpacing(6)
+
+        # Progress slider row
+        prog_row = QHBoxLayout()
+        prog_row.setSpacing(8)
+
+        self._slider = QSlider(Qt.Orientation.Horizontal)
+        self._slider.setRange(0, 10000)
+        self._slider.setValue(0)
+        self._slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 4px; background: #334155; border-radius: 2px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #7c3aed; border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                width: 14px; height: 14px;
+                background: #a78bfa; border-radius: 7px;
+                margin: -5px 0;
+            }
+        """)
+        self._slider_dragging = False
+        self._slider.sliderPressed.connect(self._on_slider_pressed)
+        self._slider.sliderReleased.connect(self._on_slider_released)
+        prog_row.addWidget(self._slider, stretch=1)
+
+        self._time_lbl = QLabel("0:00 / 0:00")
+        self._time_lbl.setStyleSheet("color: #64748b; font-size: 10px; min-width: 95px;")
+        self._time_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        prog_row.addWidget(self._time_lbl)
+        ctrl.addLayout(prog_row)
+
+        # Buttons row: navigation | spacer | speed | step
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(5)
+
+        # Go to start
+        go_start = _btn("⏮", "#1e293b", "#334155", "#94a3b8", border_color="#334155")
+        go_start.setFixedWidth(36)
+        go_start.setToolTip("Go to beginning")
+        go_start.clicked.connect(lambda: self.seek_to_ms_requested.emit(0.0))
+        btn_row.addWidget(go_start)
+
+        # Rewind
+        rw15 = _btn("-15s", "#1e293b", "#334155", "#94a3b8", border_color="#334155")
+        rw15.setFixedWidth(48)
+        rw15.setToolTip("Rewind 15 seconds")
+        rw15.clicked.connect(lambda: self.seek_delta_requested.emit(-15.0))
+        btn_row.addWidget(rw15)
+
+        rw5 = _btn("-5s", "#1e293b", "#334155", "#94a3b8", border_color="#334155")
+        rw5.setFixedWidth(44)
+        rw5.setToolTip("Rewind 5 seconds")
+        rw5.clicked.connect(lambda: self.seek_delta_requested.emit(-5.0))
+        btn_row.addWidget(rw5)
+
+        # Pause / Play
+        self._play_btn = _btn("⏸", "#1e293b", "#334155", "#60a5fa", border_color="#334155")
+        self._play_btn.setFixedWidth(38)
+        self._play_btn.setToolTip("Pause / Play")
+        self._play_btn.clicked.connect(lambda: self.pause_toggled.emit())
+        btn_row.addWidget(self._play_btn)
+
+        # Forward
+        fw5 = _btn("+5s", "#1e293b", "#334155", "#94a3b8", border_color="#334155")
+        fw5.setFixedWidth(44)
+        fw5.setToolTip("Skip forward 5 seconds")
+        fw5.clicked.connect(lambda: self.seek_delta_requested.emit(5.0))
+        btn_row.addWidget(fw5)
+
+        fw15 = _btn("+15s", "#1e293b", "#334155", "#94a3b8", border_color="#334155")
+        fw15.setFixedWidth(48)
+        fw15.setToolTip("Skip forward 15 seconds")
+        fw15.clicked.connect(lambda: self.seek_delta_requested.emit(15.0))
+        btn_row.addWidget(fw15)
+
+        btn_row.addStretch()
+
+        # Speed
+        spd_lbl = QLabel("Speed:")
+        spd_lbl.setStyleSheet("color: #475569; font-size: 10px;")
+        btn_row.addWidget(spd_lbl)
+
+        self._speed_btns: dict[float, QPushButton] = {}
+        for spd in (0.5, 1.0, 2.0, 4.0):
+            b = _btn(f"{spd:g}×", "#1e293b", "#334155", "#94a3b8", border_color="#334155")
+            b.setFixedWidth(42)
+            b.clicked.connect(lambda _checked, s=spd: self._on_speed_clicked(s))
+            btn_row.addWidget(b)
+            self._speed_btns[spd] = b
+
+        # Step one frame (useful when paused)
+        btn_row.addSpacing(8)
+        self._step_btn = _btn("▷1", "#1e293b", "#334155", "#94a3b8", border_color="#334155")
+        self._step_btn.setFixedWidth(42)
+        self._step_btn.setToolTip("Step one frame (only active when paused)")
+        self._step_btn.setEnabled(False)
+        self._step_btn.clicked.connect(lambda: self.step_frame_requested.emit())
+        btn_row.addWidget(self._step_btn)
+
+        ctrl.addLayout(btn_row)
+        layout.addWidget(self._controls)
+
+        # Highlight 1× as default active speed
+        self._active_speed: float = 1.0
+        self._highlight_speed(1.0)
+
+        self._controls.setVisible(is_video)
+        self._duration_ms: float = 0.0
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _on_slider_pressed(self):
+        self._slider_dragging = True
+
+    def _on_slider_released(self):
+        self._slider_dragging = False
+        if self._duration_ms > 0:
+            frac = self._slider.value() / 10000.0
+            self.seek_to_ms_requested.emit(frac * self._duration_ms)
+
+    def _on_speed_clicked(self, speed: float):
+        self._highlight_speed(speed)
+        self.speed_requested.emit(speed)
+
+    def _highlight_speed(self, speed: float):
+        self._active_speed = speed
+        for s, b in self._speed_btns.items():
+            active = abs(s - speed) < 0.01
+            b.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {'#7c3aed' if active else '#1e293b'};
+                    color: {'#ffffff' if active else '#94a3b8'};
+                    border: 1px solid {'#7c3aed' if active else '#334155'};
+                    border-radius: 6px;
+                    font-size: 11px;
+                    font-weight: bold;
+                    padding: 5px 12px;
+                }}
+                QPushButton:hover {{
+                    background-color: {'#6d28d9' if active else '#334155'};
+                }}
+            """)
+
+    @staticmethod
+    def _fmt_ms(ms: float) -> str:
+        s = int(ms / 1000)
+        return f"{s // 60}:{s % 60:02d}"
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def update_frame(self, frame_bgr):
+        import numpy as np
+        frame_bgr = np.ascontiguousarray(frame_bgr)
+        h, w = frame_bgr.shape[:2]
+        rgb = frame_bgr[:, :, ::-1].copy()
+        img = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format.Format_RGB888)
+        pix = QPixmap.fromImage(img)
+        self._label.setPixmap(
+            pix.scaled(self._label.size(),
+                       Qt.AspectRatioMode.KeepAspectRatio,
+                       Qt.TransformationMode.SmoothTransformation)
+        )
+
+    def update_video_state(self, pos_ms: float, duration_ms: float, speed: float, paused: bool = False):
+        """Called from the poll timer (Qt main thread) to update the controls bar."""
+        self._duration_ms = duration_ms
+        if not self._slider_dragging and duration_ms > 0:
+            self._slider.setValue(int(pos_ms / duration_ms * 10000))
+        self._time_lbl.setText(f"{self._fmt_ms(pos_ms)} / {self._fmt_ms(duration_ms)}")
+        if abs(speed - self._active_speed) > 0.01:
+            self._highlight_speed(speed)
+        # Update pause button label and step button state
+        self._play_btn.setText("▶" if paused else "⏸")
+        self._play_btn.setToolTip("Play" if paused else "Pause")
+        self._step_btn.setEnabled(paused)
+
+    def closeEvent(self, event):
+        self.closed.emit()
+        super().closeEvent(event)
+
+
 # ── Single service row ─────────────────────────────────────────────────────────
 
 class ServiceRow(QFrame):
     _state_changed = pyqtSignal()
+    _duplicate_requested = pyqtSignal(object)  # emits the new ServiceConfig to the parent dialog
 
     def __init__(self, cfg: ServiceConfig, parent=None):
         super().__init__(parent)
@@ -410,6 +821,9 @@ class ServiceRow(QFrame):
         self._spinner_timer = QTimer(self)
         self._spinner_timer.timeout.connect(self._spin)
         self._state_changed.connect(self._refresh)
+        self._preview_dialog: PreviewDialog | None = None
+        self._preview_poll_timer = QTimer(self)
+        self._preview_poll_timer.timeout.connect(self._poll_preview)
         self.setStyleSheet("""
             QFrame {
                 background-color: #16213e;
@@ -461,6 +875,16 @@ class ServiceRow(QFrame):
         self._stop_btn.clicked.connect(self._stop)
         top.addWidget(self._stop_btn)
 
+        self._record_btn = _btn("●  Rec", "#7f1d1d", "#991b1b", "#fecaca", border_color="#7f1d1d")
+        self._record_btn.setFixedWidth(84)
+        self._record_btn.clicked.connect(self._toggle_recording)
+        top.addWidget(self._record_btn)
+
+        self._preview_btn = _btn("👁  Preview", "#1e3a5f", "#1e4a7f", "#60a5fa", border_color="#1e4a7f")
+        self._preview_btn.setFixedWidth(90)
+        self._preview_btn.clicked.connect(self._toggle_preview)
+        top.addWidget(self._preview_btn)
+
         self._more_btn = QPushButton("⋯")
         self._more_btn.setFixedWidth(34)
         self._more_btn.setStyleSheet("""
@@ -493,6 +917,8 @@ class ServiceRow(QFrame):
         self._act_relaunch.triggered.connect(self._relaunch)
         self._act_edit = more_menu.addAction("✎  Edit config")
         self._act_edit.triggered.connect(self._edit)
+        self._act_duplicate = more_menu.addAction("⧉  Duplicate")
+        self._act_duplicate.triggered.connect(self._duplicate)
         more_menu.addSeparator()
         self._act_remove = more_menu.addAction("✕  Remove")
         self._act_remove.triggered.connect(self._remove)
@@ -545,11 +971,22 @@ class ServiceRow(QFrame):
     def _update_ports_label(self):
         model_name = self._cfg.model_path.split("/")[-1].split("\\")[-1] if self._cfg.model_path else "no model"
         auto = "  ⟳" if self._cfg.auto_start else ""
-        if self._cfg.rtsp_enabled:
+        rec = "  🎥" if self._cfg.record_stream else ""
+        mode = self._cfg.input_mode if self._cfg.input_mode in ("http", "rtsp", "video") else (
+            "rtsp" if self._cfg.rtsp_enabled else "http"
+        )
+        if mode == "rtsp":
             source = f"rtsp://{self._cfg.rtsp_ip}:{self._cfg.rtsp_port}/…"
             self._ports_lbl.setText(
                 f"📷 {source}  →  {self._cfg.output_host}:{self._cfg.output_port}"
-                f"   [{model_name}]{auto}"
+                f"   [{model_name}]{auto}{rec}"
+            )
+        elif mode == "video":
+            video_name = self._cfg.video_path.split("/")[-1].split("\\")[-1] if self._cfg.video_path else "video"
+            loop = "  ↻" if self._cfg.video_loop else ""
+            self._ports_lbl.setText(
+                f"🎬 {video_name}  →  {self._cfg.output_host}:{self._cfg.output_port}"
+                f"   [{model_name}]{auto}{rec}{loop}"
             )
         else:
             self._ports_lbl.setText(
@@ -576,6 +1013,20 @@ class ServiceRow(QFrame):
         self._stop_btn.setEnabled(running or loading)
         self._act_relaunch.setEnabled(state != STATE_LOADING)
         self._act_edit.setEnabled(state in (STATE_STOPPED, STATE_ERROR))
+
+        mode = self._cfg.input_mode if self._cfg.input_mode in ("http", "rtsp", "video") else (
+            "rtsp" if self._cfg.rtsp_enabled else "http"
+        )
+        can_record = mode in ("rtsp", "video")
+        svc = self._registry.get_service(self._cfg.name)
+        is_recording = svc.is_recording if svc else (self._cfg.record_stream and can_record)
+        is_previewing = svc.is_previewing if svc else False
+        self._record_btn.setVisible(can_record)
+        self._record_btn.setEnabled(running and can_record)
+        self._record_btn.setText("■  Rec Off" if is_recording else "●  Rec")
+        self._preview_btn.setVisible(can_record)
+        self._preview_btn.setEnabled(running and can_record)
+        self._preview_btn.setText("■  Preview" if is_previewing else "👁  Preview")
 
         if running:
             self._dot.setStyleSheet("color: #4ade80; font-size: 16px;")
@@ -624,7 +1075,113 @@ class ServiceRow(QFrame):
     def _stop(self):
         self._registry.stop(self._cfg.name)
         self._spinner_timer.stop()
+        self._stop_preview_ui()
         self._refresh()
+
+    def _toggle_recording(self):
+        svc = self._registry.get_service(self._cfg.name)
+        if svc is None:
+            QMessageBox.warning(self.window(), "Recording", "Service is not available.")
+            return
+        if not svc.is_running:
+            QMessageBox.warning(self.window(), "Recording", "Start the service before recording.")
+            return
+
+        if svc.is_recording:
+            svc.stop_recording()
+        else:
+            err = svc.start_recording(record_dir=self._cfg.record_dir)
+            if err:
+                QMessageBox.warning(self.window(), "Recording", err)
+                return
+        self._refresh()
+
+    def _toggle_preview(self):
+        svc = self._registry.get_service(self._cfg.name)
+        if svc is None:
+            return
+        if svc.is_previewing:
+            self._stop_preview_ui()
+        else:
+            err = svc.start_preview()
+            if err:
+                QMessageBox.warning(self.window(), "Preview", err)
+                return
+            if self._preview_dialog is None:
+                mode = self._cfg.input_mode if self._cfg.input_mode in ("http", "rtsp", "video") else (
+                    "rtsp" if self._cfg.rtsp_enabled else "http"
+                )
+                self._preview_dialog = PreviewDialog(
+                    self._cfg.name,
+                    is_video=(mode == "video"),
+                    parent=self.window(),
+                )
+                self._preview_dialog.closed.connect(self._on_preview_dialog_closed)
+                self._preview_dialog.seek_delta_requested.connect(self._on_preview_seek_delta)
+                self._preview_dialog.seek_to_ms_requested.connect(self._on_preview_seek_to_ms)
+                self._preview_dialog.speed_requested.connect(self._on_preview_speed)
+                self._preview_dialog.pause_toggled.connect(self._on_preview_pause_toggled)
+                self._preview_dialog.step_frame_requested.connect(self._on_preview_step_frame)
+            self._preview_dialog.show()
+            self._preview_dialog.raise_()
+            self._preview_poll_timer.start(50)  # poll at 20 fps
+            self._refresh()
+
+    def _stop_preview_ui(self):
+        svc = self._registry.get_service(self._cfg.name)
+        if svc:
+            svc.stop_preview()
+        self._preview_poll_timer.stop()
+        if self._preview_dialog:
+            self._preview_dialog.hide()
+        self._refresh()
+
+    def _on_preview_dialog_closed(self):
+        """Called when the user clicks X on the preview window."""
+        self._stop_preview_ui()
+
+    def _on_preview_seek_delta(self, delta: float):
+        svc = self._registry.get_service(self._cfg.name)
+        if svc:
+            svc.seek_video_relative(delta)
+
+    def _on_preview_seek_to_ms(self, target_ms: float):
+        svc = self._registry.get_service(self._cfg.name)
+        if svc:
+            svc.seek_video_to_ms(target_ms)
+
+    def _on_preview_speed(self, speed: float):
+        svc = self._registry.get_service(self._cfg.name)
+        if svc:
+            svc.set_video_speed(speed)
+
+    def _on_preview_pause_toggled(self):
+        svc = self._registry.get_service(self._cfg.name)
+        if svc:
+            svc.toggle_video_pause()
+
+    def _on_preview_step_frame(self):
+        svc = self._registry.get_service(self._cfg.name)
+        if svc:
+            svc.step_video_frame()
+
+    def _poll_preview(self):
+        """Called by QTimer on the main thread — fetch latest frame and render."""
+        svc = self._registry.get_service(self._cfg.name)
+        if svc is None or not svc.is_previewing:
+            self._preview_poll_timer.stop()
+            self._refresh()
+            return
+        frame = svc.get_preview_frame()
+        if frame is not None and self._preview_dialog:
+            self._preview_dialog.update_frame(frame)
+        # Update progress slider/time label for video mode
+        mode = self._cfg.input_mode if self._cfg.input_mode in ("http", "rtsp", "video") else (
+            "rtsp" if self._cfg.rtsp_enabled else "http"
+        )
+        if mode == "video" and self._preview_dialog:
+            pos_ms, dur_ms, speed, paused = svc.get_video_state()
+            self._preview_dialog.update_video_state(pos_ms, dur_ms, speed, paused)
 
     def _relaunch(self):
         cfg = self._registry.get_config(self._cfg.name) or self._cfg
@@ -655,6 +1212,41 @@ class ServiceRow(QFrame):
         self._cfg = new_cfg
         self._update_ports_label()
 
+    def _duplicate(self):
+        import dataclasses
+        # Pre-fill with a "_copy" name so the user can rename before saving
+        copy_cfg = dataclasses.replace(self._cfg, name=f"{self._cfg.name}_copy")
+        dlg = ServiceConfigDialog(copy_cfg, parent=self.window(), is_duplicate=True)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_cfg = dlg.result_config
+        if new_cfg is None:
+            return
+        self._duplicate_requested.emit(new_cfg)
+
+    def cleanup(self):
+        """Stop all timers and close the preview dialog. Call before destroying the row."""
+        self._spinner_timer.stop()
+        self._preview_poll_timer.stop()
+        if self._preview_dialog is not None:
+            for sig in (
+                self._preview_dialog.closed,
+                self._preview_dialog.seek_delta_requested,
+                self._preview_dialog.seek_to_ms_requested,
+                self._preview_dialog.speed_requested,
+                self._preview_dialog.pause_toggled,
+                self._preview_dialog.step_frame_requested,
+            ):
+                try:
+                    sig.disconnect()
+                except Exception:
+                    pass
+            self._preview_dialog.close()
+            self._preview_dialog = None
+        svc = self._registry.get_service(self._cfg.name)
+        if svc:
+            svc.stop_preview()
+
     def _remove(self):
         state = self._registry.get_state(self._cfg.name)
         msg = f"Remove service '{self._cfg.name}'?"
@@ -666,7 +1258,7 @@ class ServiceRow(QFrame):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        self._spinner_timer.stop()
+        self.cleanup()
         self._registry.remove_config(self._cfg.name)
         self.setParent(None)   # type: ignore
         self.deleteLater()
@@ -710,7 +1302,7 @@ class DetectionDialog(QDialog):
 
         sub = QLabel(
             "Each service runs YOLO detection and pushes JSON results to the configured output.  "
-            "Input can be an HTTP endpoint or a live RTSP camera stream.  "
+            "Input can be an HTTP endpoint, a live RTSP camera stream, or a looping local video file.  "
             "Services marked ⟳ auto-start when VisionQ opens."
         )
         sub.setStyleSheet("color: #475569; font-size: 11px;")
@@ -807,9 +1399,20 @@ class DetectionDialog(QDialog):
 
     def _add_row(self, cfg: ServiceConfig):
         row = ServiceRow(cfg)
+        row._duplicate_requested.connect(self._on_duplicate_requested)
         self._rows.append(row)
         self._rows_layout.insertWidget(self._rows_layout.count() - 1, row)
         self._update_empty()
+
+    def _on_duplicate_requested(self, new_cfg: ServiceConfig):
+        existing = [r.config().name for r in self._rows if r.parent() is not None]
+        if new_cfg.name in existing:
+            QMessageBox.warning(self, "Duplicate Name",
+                                f"A service named '{new_cfg.name}' already exists.")
+            return
+        get_registry().upsert_config(new_cfg)
+        self._add_row(new_cfg)
+        # Don't auto-start — user decides when to start the duplicate
 
     def _update_empty(self):
         alive = []
@@ -879,4 +1482,10 @@ class DetectionDialog(QDialog):
 
     def closeEvent(self, event):
         self._timer.stop()
+        for row in self._rows:
+            try:
+                if row.parent() is not None:
+                    row.cleanup()
+            except Exception:
+                pass
         super().closeEvent(event)

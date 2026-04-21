@@ -1,8 +1,8 @@
 """Simple result receiver — listens on a port and shows detection results in the browser.
 
-GET  /        → HTML dashboard (auto-refreshes)
-POST /result  → receives JSON from detection service
-GET  /api/results → returns last N results as JSON (used by dashboard JS)
+GET  /        → HTML dashboard (auto-refreshes via JS polling)
+POST /result  → receives JSON from a detection service
+GET  /api/results → returns last N results per service as JSON
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Optional
 
 log = logging.getLogger("result_receiver")
 
-# _MAX_RESULTS = 200
+_MAX_PER_SERVICE = 100  # how many results to keep per service
 
 _HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -23,93 +23,227 @@ _HTML = """<!DOCTYPE html>
 <title>VisionQ — Detection Results</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #0f172a; color: #e2e8f0; font-family: monospace; padding: 24px; }
-  h1 { color: #a78bfa; font-size: 20px; margin-bottom: 6px; }
-  .sub { color: #475569; font-size: 12px; margin-bottom: 20px; }
-  .stats { display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
-  .stat { background: #1e293b; border-radius: 8px; padding: 12px 20px; min-width: 130px; }
-  .stat-val { font-size: 28px; font-weight: bold; color: #a78bfa; }
-  .stat-lbl { font-size: 11px; color: #64748b; margin-top: 2px; }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th { background: #1e293b; color: #64748b; font-size: 10px; letter-spacing: 1px;
-       text-align: left; padding: 8px 12px; border-bottom: 1px solid #334155; }
-  td { padding: 7px 12px; border-bottom: 1px solid #1e293b; vertical-align: middle; }
-  tr:hover td { background: #1e293b44; }
-  .car { color: #4ade80; font-weight: bold; }
-  .nocar { color: #475569; }
-  .fwd { color: #60a5fa; }
-  .bwd { color: #f97316; }
-  .unk { color: #475569; }
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-         background: #4ade80; margin-right: 6px; animation: pulse 1.5s infinite; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+  body {
+    background: #0f172a; color: #e2e8f0;
+    font-family: monospace; padding: 24px;
+    min-height: 100vh;
+  }
+  /* ── Header ── */
+  .header { margin-bottom: 24px; }
+  h1 { color: #a78bfa; font-size: 20px; margin-bottom: 4px; }
+  .sub { color: #475569; font-size: 12px; }
+  #global-status {
+    font-size: 11px; color: #64748b;
+    display: flex; align-items: center; gap: 6px; margin-top: 10px;
+  }
+  .dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: #4ade80; animation: pulse 1.5s infinite;
+  }
   .offline .dot { background: #f87171; animation: none; }
-  #status { font-size: 11px; color: #64748b; display: flex; align-items: center; gap: 6px; margin-bottom: 16px; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+  /* ── Service panels grid ── */
+  #panels {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(480px, 1fr));
+    gap: 20px;
+    align-items: start;
+  }
+  .panel {
+    background: #1e293b; border-radius: 10px;
+    border: 1px solid #334155; overflow: hidden;
+  }
+
+  /* ── Panel header ── */
+  .panel-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; border-bottom: 1px solid #334155;
+    background: #0f172a;
+  }
+  .panel-name { color: #a78bfa; font-size: 14px; font-weight: bold; }
+  .panel-status {
+    font-size: 10px; color: #64748b;
+    display: flex; align-items: center; gap: 5px;
+  }
+  .panel-status .dot { width: 6px; height: 6px; }
+
+  /* ── Panel stats ── */
+  .panel-stats {
+    display: flex; gap: 0;
+    border-bottom: 1px solid #334155;
+  }
+  .stat {
+    flex: 1; padding: 10px 14px;
+    border-right: 1px solid #334155;
+  }
+  .stat:last-child { border-right: none; }
+  .stat-val { font-size: 20px; font-weight: bold; color: #a78bfa; }
+  .stat-lbl { font-size: 10px; color: #64748b; margin-top: 2px; }
+
+  /* ── Panel table ── */
+  .panel-table-wrap {
+    max-height: 320px; overflow-y: auto;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  th {
+    background: #0f172a; color: #475569; font-size: 9px;
+    letter-spacing: 1px; text-align: left;
+    padding: 6px 12px; border-bottom: 1px solid #334155;
+    position: sticky; top: 0; z-index: 1;
+  }
+  td { padding: 6px 12px; border-bottom: 1px solid #1e293b44; vertical-align: middle; }
+  tr:hover td { background: #ffffff08; }
+
+  /* ── State colours ── */
+  .car     { color: #4ade80; font-weight: bold; }
+  .nocar   { color: #475569; }
+  .fwd     { color: #60a5fa; }
+  .bwd     { color: #f97316; }
+  .idle-cl { color: #facc15; }
+  .unk     { color: #475569; }
+
+  /* ── Empty / no-services placeholder ── */
+  #empty {
+    color: #334155; font-size: 13px; text-align: center;
+    padding: 60px 0; display: none;
+  }
+  #empty.visible { display: block; }
 </style>
 </head>
 <body>
-<h1>⚡ VisionQ — Detection Results</h1>
-<p class="sub">Live feed from detection services</p>
-<div id="status"><span class="dot"></span><span id="status-text">Connecting…</span></div>
-<div class="stats">
-  <div class="stat"><div class="stat-val" id="total">0</div><div class="stat-lbl">Total detections</div></div>
-  <div class="stat"><div class="stat-val" id="cars">0</div><div class="stat-lbl">Cars detected</div></div>
-  <div class="stat"><div class="stat-val" id="last-conf">—</div><div class="stat-lbl">Last confidence</div></div>
-  <div class="stat"><div class="stat-val" id="last-dir">—</div><div class="stat-lbl">Last direction</div></div>
+
+<div class="header">
+  <h1>⚡ VisionQ — Detection Results</h1>
+  <p class="sub">Each active service appears as its own panel</p>
+  <div id="global-status">
+    <span class="dot"></span>
+    <span id="status-text">Connecting…</span>
+  </div>
 </div>
-<table>
-  <thead>
-    <tr>
-      <th>TIME</th>
-      <th>SERVICE</th>
-      <th>DETECTED</th>
-      <th>DIRECTION</th>
-      <th>CONFIDENCE</th>
-      <th>FRAMES</th>
-    </tr>
-  </thead>
-  <tbody id="tbody"></tbody>
-</table>
+
+<div id="panels"></div>
+<div id="empty">No services have reported yet.</div>
+
 <script>
-let seen = 0;
+// panels we've already created  {serviceName -> true}
+const knownPanels = {};
+
 async function poll() {
   try {
     const r = await fetch('/api/results');
-    const data = await r.json();
-    document.getElementById('status').classList.remove('offline');
-    document.getElementById('status-text').textContent = 'Live';
-    render(data);
+    const byService = await r.json();  // { service_name: [rows...] }
+
+    setStatus(true);
+    const names = Object.keys(byService);
+
+    if (names.length === 0) {
+      document.getElementById('empty').classList.add('visible');
+    } else {
+      document.getElementById('empty').classList.remove('visible');
+      names.forEach(name => {
+        if (!knownPanels[name]) createPanel(name);
+        renderPanel(name, byService[name]);
+      });
+    }
   } catch(e) {
-    document.getElementById('status').classList.add('offline');
-    document.getElementById('status-text').textContent = 'Disconnected';
+    setStatus(false);
   }
 }
-function render(rows) {
-  document.getElementById('total').textContent = rows.length;
-  const cars = rows.filter(r => r.car_detected);
-  document.getElementById('cars').textContent = cars.length;
-  if (cars.length > 0) {
-    const last = cars[0];
-    document.getElementById('last-conf').textContent = (last.confidence * 100).toFixed(1) + '%';
-    document.getElementById('last-dir').textContent = last.direction || '—';
+
+function setStatus(online) {
+  const el = document.getElementById('global-status');
+  el.classList.toggle('offline', !online);
+  document.getElementById('status-text').textContent = online ? 'Live' : 'Disconnected';
+}
+
+function createPanel(name) {
+  knownPanels[name] = true;
+  const id = panelId(name);
+  const div = document.createElement('div');
+  div.className = 'panel';
+  div.id = id;
+  div.innerHTML = `
+    <div class="panel-header">
+      <span class="panel-name">${escHtml(name)}</span>
+      <span class="panel-status"><span class="dot"></span><span class="ps-text">waiting…</span></span>
+    </div>
+    <div class="panel-stats">
+      <div class="stat"><div class="stat-val" id="${id}-total">0</div><div class="stat-lbl">Reports</div></div>
+      <div class="stat"><div class="stat-val" id="${id}-cars">0</div><div class="stat-lbl">Car</div></div>
+      <div class="stat"><div class="stat-val" id="${id}-rears">0</div><div class="stat-lbl">Car rear</div></div>
+      <div class="stat"><div class="stat-val" id="${id}-dir">—</div><div class="stat-lbl">Last dir</div></div>
+    </div>
+    <div class="panel-table-wrap">
+      <table>
+        <thead><tr>
+          <th>TIME</th><th>CAR</th><th>CAR DIR</th><th>REAR</th><th>REAR DIR</th><th>FRAMES</th>
+        </tr></thead>
+        <tbody id="${id}-tbody"></tbody>
+      </table>
+    </div>
+  `;
+  document.getElementById('panels').appendChild(div);
+}
+
+function renderPanel(name, rows) {
+  const id = panelId(name);
+  const panel = document.getElementById(id);
+  if (!panel) return;
+
+  // Stats
+  const carRows  = rows.filter(r => r.car?.detected);
+  const rearRows = rows.filter(r => r.car_rear?.detected);
+  setText(id + '-total', rows.length);
+  setText(id + '-cars',  carRows.length);
+  setText(id + '-rears', rearRows.length);
+
+  const latest = rows[0];
+  if (latest) {
+    const carDir  = latest.car?.direction      || '—';
+    const rearDir = latest.car_rear?.direction || '—';
+    setText(id + '-dir', carDir === rearDir ? carDir : carDir + ' / ' + rearDir);
   }
-  const tbody = document.getElementById('tbody');
-  tbody.innerHTML = rows.map(r => `
+
+  // Status dot — "live" if last result arrived recently
+  const dot = panel.querySelector('.panel-status .dot');
+  const psText = panel.querySelector('.ps-text');
+  if (rows.length > 0) {
+    dot.style.background = '#4ade80';
+    dot.style.animation = 'pulse 1.5s infinite';
+    psText.textContent = 'Live · ' + (rows[0].timestamp || '');
+  }
+
+  // Table rows
+  const tbody = document.getElementById(id + '-tbody');
+  tbody.innerHTML = rows.map(r => {
+    const car  = r.car      || {};
+    const rear = r.car_rear || {};
+    const carConf  = car.detected  && car.confidence  ? ' ' + (car.confidence  * 100).toFixed(0) + '%' : '';
+    const rearConf = rear.detected && rear.confidence ? ' ' + (rear.confidence * 100).toFixed(0) + '%' : '';
+    return `
     <tr>
-      <td style="color:#475569">${r.timestamp}</td>
-      <td style="color:#94a3b8">${r.service_name || '—'}</td>
-      <td class="${r.car_detected ? 'car' : 'nocar'}">${r.car_detected ? '● CAR' : '○ no car'}</td>
-      <td class="${dirClass(r.direction)}">${r.direction || '—'}</td>
-      <td style="color:#e2e8f0">${r.car_detected ? (r.confidence * 100).toFixed(1) + '%' : '—'}</td>
+      <td style="color:#475569">${r.timestamp || '—'}</td>
+      <td class="${car.detected  ? 'car' : 'nocar'}">${car.detected  ? '● CAR'  : '○ —'}</td>
+      <td class="${dirClass(car.direction)}">${car.detected   ? (car.direction  || '—') + carConf  : '—'}</td>
+      <td class="${rear.detected ? 'car' : 'nocar'}">${rear.detected ? '● REAR' : '○ —'}</td>
+      <td class="${dirClass(rear.direction)}">${rear.detected ? (rear.direction || '—') + rearConf : '—'}</td>
       <td style="color:#64748b">${r.frames_analyzed ?? '—'}</td>
     </tr>
-  `).join('');
+  `;
+  }).join('');
 }
+
 function dirClass(d) {
-  if (d === 'forward') return 'fwd';
+  if (d === 'forward')  return 'fwd';
   if (d === 'backward') return 'bwd';
+  if (d === 'idle')     return 'idle-cl';
   return 'unk';
 }
+function panelId(name) { return 'svc-' + name.replace(/[^a-zA-Z0-9]/g, '_'); }
+function setText(id, val) { const el = document.getElementById(id); if (el) el.textContent = val; }
+function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
 setInterval(poll, 800);
 poll();
 </script>
@@ -122,7 +256,8 @@ class ResultReceiver:
     """Lightweight Flask server that receives and displays detection results."""
 
     def __init__(self):
-        self._results: deque[dict] = deque()
+        # Results stored per service: { service_name: deque[dict] }
+        self._results: dict[str, deque] = {}
         self._lock = threading.Lock()
         self._server = None
         self._thread: Optional[threading.Thread] = None
@@ -147,14 +282,20 @@ class ResultReceiver:
         def receive():
             data = request.get_json(silent=True) or {}
             data["timestamp"] = datetime.now().strftime("%H:%M:%S")
+            name = data.get("service_name") or "unknown"
             with receiver._lock:
-                receiver._results.appendleft(data)
+                if name not in receiver._results:
+                    receiver._results[name] = deque(maxlen=_MAX_PER_SERVICE)
+                receiver._results[name].appendleft(data)
             return jsonify({"ok": True})
 
         @app.route("/api/results", methods=["GET"])
         def api_results():
             with receiver._lock:
-                return jsonify(list(receiver._results))
+                return jsonify({
+                    name: list(q)
+                    for name, q in receiver._results.items()
+                })
 
         from werkzeug.serving import make_server
         try:
@@ -178,6 +319,8 @@ class ResultReceiver:
             self._server = None
         self._running = False
         self._thread = None
+        with self._lock:
+            self._results.clear()
 
     @property
     def is_running(self) -> bool:

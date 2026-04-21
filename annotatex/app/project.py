@@ -220,3 +220,99 @@ class Project:
                                 pass
                 if boxes:
                     self.annotations.setdefault(fn, ImageAnnotation(filename=fn)).boxes = boxes
+
+    # ── COCO I/O ─────────────────────────────────────────────────────────────
+
+    def load_coco_labels(self, coco_json_path: str) -> dict:
+        """
+        Import annotations from a COCO-format JSON file (e.g. Roboflow export).
+
+        Clears existing classes and rebuilds them from the JSON categories,
+        deduplicating names so a Roboflow quirk (duplicate 'car' entries) is
+        handled gracefully.  Bounding boxes are converted from COCO pixel
+        [x_min, y_min, w, h] to normalised YOLO [cx, cy, w, h].
+
+        Returns stats dict: {"images_annotated": N, "annotations": N, "classes": N}
+        """
+        import json as _json
+
+        with open(coco_json_path, encoding="utf-8") as f:
+            data = _json.load(f)
+
+        # ── Build class list, deduplicating by name ───────────────────────────
+        name_to_cls_id: dict[str, int] = {}   # unique name  → our 0-based id
+        cat_id_to_cls_id: dict[int, int] = {} # COCO cat id → our class id
+
+        for cat in data.get("categories", []):
+            name = cat["name"]
+            coco_cat_id = cat["id"]
+            if name not in name_to_cls_id:
+                name_to_cls_id[name] = len(name_to_cls_id)
+            cat_id_to_cls_id[coco_cat_id] = name_to_cls_id[name]
+
+        colors = generate_class_colors(len(name_to_cls_id))
+        self.classes = [
+            ClassDef(id=cls_id, name=name, color=colors[cls_id])
+            for name, cls_id in name_to_cls_id.items()
+        ]
+
+        # ── Build lookup: filename → (img_id, width, height) ─────────────────
+        # Roboflow filenames may contain a path prefix; we match on basename.
+        # Keys are lowercased for case-insensitive matching on Windows.
+        basename_to_info: dict[str, tuple[int, int, int]] = {}
+        for img in data.get("images", []):
+            bname = Path(img["file_name"]).name.lower()
+            basename_to_info[bname] = (img["id"], img.get("width") or 0, img.get("height") or 0)
+
+        # Also index annotations by image_id
+        anns_by_img: dict[int, list] = {}
+        for ann in data.get("annotations", []):
+            anns_by_img.setdefault(ann["image_id"], []).append(ann)
+
+        # ── Populate annotations ──────────────────────────────────────────────
+        ann_count = 0
+        annotated_images = 0
+
+        for fn in self.images:
+            bname = Path(fn).name.lower()  # normalize for case-insensitive match
+            info = basename_to_info.get(bname)
+            if info is None:
+                continue
+
+            img_id, img_w, img_h = info
+            if img_w == 0 or img_h == 0:
+                continue
+
+            boxes = []
+            for ann in anns_by_img.get(img_id, []):
+                cls_id = cat_id_to_cls_id.get(ann["category_id"])
+                if cls_id is None:
+                    continue
+
+                x, y, bw, bh = ann["bbox"]
+                # COCO → normalised YOLO
+                cx = (x + bw / 2.0) / img_w
+                cy = (y + bh / 2.0) / img_h
+                nw = bw / img_w
+                nh = bh / img_h
+                # Clamp to valid range
+                cx = max(0.0, min(1.0, cx))
+                cy = max(0.0, min(1.0, cy))
+                nw = max(0.0, min(1.0, nw))
+                nh = max(0.0, min(1.0, nh))
+                if nw > 1e-4 and nh > 1e-4:
+                    boxes.append(BoundingBox(class_id=cls_id, cx=cx, cy=cy, w=nw, h=nh))
+                    ann_count += 1
+
+            if boxes:
+                self.annotations[fn] = ImageAnnotation(filename=fn, boxes=boxes)
+                annotated_images += 1
+
+        self.modified = True
+        self.invalidate_annotated_count()
+        return {
+            "images_annotated": annotated_images,
+            "annotations": ann_count,
+            "classes": len(self.classes),
+            "total_json_images": len(basename_to_info),
+        }

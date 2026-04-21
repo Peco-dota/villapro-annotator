@@ -153,8 +153,8 @@ class WelcomeScreen(QWidget):
 
         left_layout.addSpacing(4)
 
-        # Batch export
-        batch_btn = QPushButton("  📦  Batch Export…")
+        # Merge datasets
+        batch_btn = QPushButton("  📦  Merge Datasets…")
         batch_btn.clicked.connect(self.batch_export_requested)
         left_layout.addWidget(batch_btn)
 
@@ -376,12 +376,17 @@ def main():
 
     main_win: MainWindow = None  # type: ignore
 
+    def show_welcome():
+        # Ensure recent projects list is always fresh when returning home.
+        welcome._load_recent()
+        welcome.show()
+
     def open_main(project: Project):
         nonlocal main_win
         welcome.hide()
         main_win = MainWindow()
         main_win._load_project(project)
-        main_win.home_requested.connect(lambda: welcome.show())
+        main_win.home_requested.connect(show_welcome)
         main_win.showMaximized()
 
     def on_new_project():
@@ -445,10 +450,24 @@ def main():
         dlg = DetectionDialog(welcome)
         dlg.exec()
 
-    # Graceful shutdown — stop all detection services before Qt tears down
+    # Graceful shutdown — stop all detection services and receivers before Qt tears down.
+    # This is a last-resort safety net; MainWindow.closeEvent already does this for the
+    # normal close path.  This covers the welcome-screen close and any edge cases.
     def _on_quit():
-        from app.detection_service import get_registry
-        get_registry().stop_all()
+        try:
+            welcome._poll_timer.stop()
+        except Exception:
+            pass
+        try:
+            from app.detection_service import get_registry
+            get_registry().stop_all()
+        except Exception:
+            pass
+        try:
+            from app.result_receiver import get_receiver
+            get_receiver().stop()
+        except Exception:
+            pass
 
     app.aboutToQuit.connect(_on_quit)
 

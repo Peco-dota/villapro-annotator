@@ -253,3 +253,82 @@ def _write_label(path: Path, boxes: list["BoundingBox"]):
     with open(path, "w") as f:
         for b in boxes:
             f.write(b.to_yolo_line() + "\n")
+
+
+# ── Folder-based augmentation (post-export in-place) ─────────────────────────
+
+def augment_from_folder(folder: str, cfg: AugConfig, progress_cb=None) -> dict:
+    """
+    Augment all images in <folder>/images/ using paired labels from <folder>/labels/.
+    Augmented copies are written back into the same images/ and labels/ directories
+    alongside the originals. Files whose stem already contains '_aug' are skipped so
+    re-running this function on the same folder is safe.
+
+    Returns stats dict: {"original": N, "augmented": N, "skipped": N}
+    """
+    from app.annotation import BoundingBox
+
+    folder = Path(folder)
+    img_dir = folder / "images"
+    lbl_dir = folder / "labels"
+
+    if not img_dir.exists():
+        raise FileNotFoundError(f"No 'images' subfolder found in {folder}")
+    lbl_dir.mkdir(exist_ok=True)
+
+    IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
+    # Only process originals — skip files that are already augmented copies.
+    image_files = sorted(
+        p for p in img_dir.iterdir()
+        if p.suffix.lower() in IMAGE_EXTS and "_aug" not in p.stem
+    )
+
+    stats = {"original": len(image_files), "augmented": 0, "skipped": 0}
+    rng = random.Random(42)
+    total = len(image_files)
+
+    for i, img_path in enumerate(image_files):
+        if progress_cb:
+            progress_cb(i, total)
+
+        # Parse the paired YOLO label file
+        lbl_path = lbl_dir / (img_path.stem + ".txt")
+        boxes: list[BoundingBox] = []
+        if lbl_path.exists():
+            with open(lbl_path) as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) == 5:
+                        try:
+                            boxes.append(BoundingBox(
+                                class_id=int(parts[0]),
+                                cx=float(parts[1]),
+                                cy=float(parts[2]),
+                                w=float(parts[3]),
+                                h=float(parts[4]),
+                            ))
+                        except ValueError:
+                            pass
+
+        if cfg.only_annotated and not boxes:
+            stats["skipped"] += 1
+            continue
+
+        try:
+            img = Image.open(img_path).convert("RGB")
+        except Exception:
+            stats["skipped"] += 1
+            continue
+
+        suffix = img_path.suffix.lower()
+        variants = _apply_single(img, boxes, cfg, rng)
+        for j, (aug_img, aug_boxes) in enumerate(variants):
+            aug_stem = f"{img_path.stem}_aug{j + 1}"
+            aug_img.save(img_dir / (aug_stem + suffix), quality=95)
+            _write_label(lbl_dir / (aug_stem + ".txt"), aug_boxes)
+            stats["augmented"] += 1
+
+    if progress_cb:
+        progress_cb(total, total)
+
+    return stats

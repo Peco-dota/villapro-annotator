@@ -454,13 +454,14 @@ class TrainWorker(QObject):
     finished = pyqtSignal(str)
     error = pyqtSignal(str)
 
-    def __init__(self, model_path, data_yaml, epochs, batch, imgsz, output_dir, run_name):
+    def __init__(self, model_path, data_yaml, epochs, batch, imgsz, patience, output_dir, run_name):
         super().__init__()
         self.model_path = model_path
         self.data_yaml = data_yaml
         self.epochs = epochs
         self.batch = batch
         self.imgsz = imgsz
+        self.patience = patience
         self.output_dir = output_dir
         self.run_name = run_name
         self._stop_requested = False
@@ -477,7 +478,10 @@ class TrainWorker(QObject):
 
         self.log.emit(f"Model  : {self.model_path}")
         self.log.emit(f"Dataset: {self.data_yaml}")
-        self.log.emit(f"Config : {self.epochs} epochs  batch={self.batch}  imgsz={self.imgsz}")
+        self.log.emit(
+            f"Config : {self.epochs} epochs  batch={self.batch}  "
+            f"imgsz={self.imgsz}  patience={self.patience}"
+        )
         self.log.emit(f"Device : {_detect_device()}")
         self.log.emit("─" * 52)
 
@@ -514,7 +518,7 @@ class TrainWorker(QObject):
         try:
             model.train(
                 data=self.data_yaml, epochs=self.epochs, batch=self.batch,
-                imgsz=self.imgsz, pretrained=True, patience=15,
+                imgsz=self.imgsz, pretrained=True, patience=self.patience,
                 project=self.output_dir, name=self.run_name,
                 exist_ok=True, verbose=False,
             )
@@ -1002,7 +1006,7 @@ class TrainingPage(QWidget):
         self._model_combo.addItem("YOLO26l  —  Large", "yolo26l.pt")
         self._model_combo.addItem("YOLO26x  —  XLarge (most accurate, slowest)", "yolo26x.pt")
         self._model_combo.addItem("Custom .pt file…", "__custom__")
-        self._model_combo.setCurrentIndex(1)
+        self._model_combo.setCurrentIndex(0)
         self._model_combo.currentIndexChanged.connect(self._on_model_changed)
         model_inner.addWidget(self._model_combo)
 
@@ -1033,6 +1037,7 @@ class TrainingPage(QWidget):
         for label, attr, lo, hi, val, suffix in [
             ("Epochs", "_epochs_spin", 1, 500, 50, ""),
             ("Batch size", "_batch_spin", 1, 64, 8, ""),
+            ("Patience", "_patience_spin", 1, 200, 15, ""),
         ]:
             col = QVBoxLayout()
             col.setSpacing(4)
@@ -1109,6 +1114,25 @@ class TrainingPage(QWidget):
         col_dir.addLayout(dir_row)
         out_inner.addLayout(col_dir)
 
+        # Optional: train directly from an existing merged dataset YAML
+        col_yaml = QVBoxLayout()
+        col_yaml.setSpacing(4)
+        col_yaml.addWidget(_field_label("Dataset YAML (optional — skip merge)"))
+        yaml_row = QHBoxLayout()
+        yaml_row.setSpacing(8)
+        self._data_yaml_edit = QLineEdit()
+        self._data_yaml_edit.setPlaceholderText("Select existing data.yaml to train directly…")
+        self._data_yaml_edit.setReadOnly(True)
+        yaml_row.addWidget(self._data_yaml_edit)
+        browse_yaml_btn = _small_btn("Browse…")
+        browse_yaml_btn.clicked.connect(self._browse_data_yaml)
+        yaml_row.addWidget(browse_yaml_btn)
+        clear_yaml_btn = _small_btn("Clear", color=BORDER)
+        clear_yaml_btn.clicked.connect(lambda: self._data_yaml_edit.setText(""))
+        yaml_row.addWidget(clear_yaml_btn)
+        col_yaml.addLayout(yaml_row)
+        out_inner.addLayout(col_yaml)
+
         layout.addWidget(out_card)
         layout.addStretch()
 
@@ -1130,6 +1154,13 @@ class TrainingPage(QWidget):
         if folder:
             self._out_dir_edit.setText(folder)
 
+    def _browse_data_yaml(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Existing Dataset YAML", "", "YAML Files (*.yaml *.yml)"
+        )
+        if path:
+            self._data_yaml_edit.setText(path)
+
     def get_config(self) -> dict:
         data = self._model_combo.currentData()
         return {
@@ -1137,8 +1168,10 @@ class TrainingPage(QWidget):
             "epochs": self._epochs_spin.value(),
             "batch": self._batch_spin.value(),
             "imgsz": self._imgsz_combo.currentData(),
+            "patience": self._patience_spin.value(),
             "run_name": self._run_name_edit.text().strip() or "my_training",
             "output_dir": self._out_dir_edit.text().strip(),
+            "data_yaml_override": self._data_yaml_edit.text().strip(),
         }
 
     def validate(self) -> Optional[str]:
@@ -1309,14 +1342,6 @@ class TrainDialog(QDialog):
     # ── Actions ───────────────────────────────────────────────────────────────
 
     def _start(self):
-        datasets = self._ds_page.get_datasets()
-        if not datasets:
-            QMessageBox.warning(self, "No Datasets",
-                                "Add at least one dataset in the Datasets tab.")
-            self._tab_bar.set_tab(0)
-            self._switch_tab(0)
-            return
-
         err = self._train_page.validate()
         if err:
             QMessageBox.warning(self, "Config Incomplete", err)
@@ -1325,6 +1350,39 @@ class TrainDialog(QDialog):
             return
 
         cfg = self._train_page.get_config()
+        direct_yaml = cfg.get("data_yaml_override", "")
+
+        # If user provided an existing merged data.yaml, skip merge entirely.
+        if direct_yaml:
+            yaml_path = Path(direct_yaml)
+            if not yaml_path.exists() or not yaml_path.is_file():
+                QMessageBox.warning(
+                    self,
+                    "Invalid Dataset YAML",
+                    f"Selected dataset YAML was not found:\n{direct_yaml}",
+                )
+                self._tab_bar.set_tab(1)
+                self._switch_tab(1)
+                return
+
+            self._action_btn.setEnabled(False)
+            self._action_btn.setText("Working…")
+            self._progress.setVisible(True)
+            self._set_status(f"Using existing dataset YAML… {direct_yaml}")
+            self._log_edit.clear()
+            self._log_append(f"Using existing dataset YAML: {direct_yaml}")
+            self._log_append("Skipping merge step.")
+            self._start_training(direct_yaml, cfg)
+            return
+
+        datasets = self._ds_page.get_datasets()
+        if not datasets:
+            QMessageBox.warning(self, "No Datasets",
+                                "Add at least one dataset in the Datasets tab,\n"
+                                "or choose an existing dataset YAML in Training Config.")
+            self._tab_bar.set_tab(0)
+            self._switch_tab(0)
+            return
 
         merge_dir = QFileDialog.getExistingDirectory(
             self, "Select Folder for Merged Dataset"
@@ -1375,7 +1433,8 @@ class TrainDialog(QDialog):
 
         self._train_worker = TrainWorker(
             cfg["model_path"], data_yaml, cfg["epochs"],
-            cfg["batch"], cfg["imgsz"], cfg["output_dir"], cfg["run_name"],
+            cfg["batch"], cfg["imgsz"], cfg["patience"],
+            cfg["output_dir"], cfg["run_name"],
         )
         self._train_thread = QThread()
         self._train_worker.moveToThread(self._train_thread)

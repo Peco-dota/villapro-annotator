@@ -5,7 +5,7 @@ from typing import Optional, TYPE_CHECKING
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget,
     QListWidgetItem, QScrollArea, QSizePolicy, QFrame,
-    QAbstractItemView,
+    QAbstractItemView, QMenu,
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QThread, QObject, QRunnable, QThreadPool
 from PyQt6.QtGui import QPixmap, QColor, QPainter, QBrush, QPen, QFont
@@ -141,11 +141,16 @@ class ImageThumbnailItem(QWidget):
                 "background-color: transparent; border: 1px solid transparent; border-radius: 6px;"
             )
 
+    def set_index(self, index: int):
+        self.index = index
+        self._idx_label.setText(f"#{index + 1}")
+
 
 class ImageSidebar(QWidget):
     """Left panel: image list with thumbnails."""
 
     image_selected = pyqtSignal(int)  # index
+    image_delete_requested = pyqtSignal(int)  # index
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -203,6 +208,8 @@ class ImageSidebar(QWidget):
         self._list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._list.currentRowChanged.connect(self._on_row_changed)
+        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._on_context_menu)
         layout.addWidget(self._list)
 
     def load_project(self, project: "Project"):
@@ -264,6 +271,35 @@ class ImageSidebar(QWidget):
                 ia = self._project.annotations.get(fn)
                 self._items[i].update_status(ia.box_count if ia else 0)
 
+    def remove_image_at(self, index: int):
+        """Remove one row without rebuilding the whole sidebar."""
+        if index < 0 or index >= len(self._items):
+            return
+
+        self._list.blockSignals(True)
+
+        list_item = self._list_items.pop(index)
+        widget = self._items.pop(index)
+
+        row_item = self._list.takeItem(index)
+        if row_item is not None:
+            del row_item
+
+        widget.deleteLater()
+        del list_item
+
+        for i in range(index, len(self._items)):
+            self._items[i].set_index(i)
+
+        if not self._items:
+            self._active_index = -1
+        elif self._active_index == index:
+            self._active_index = -1
+        elif self._active_index > index:
+            self._active_index -= 1
+
+        self._list.blockSignals(False)
+
     def _on_thumbnail_ready(self, filename: str, pm):
         if not self._project:
             return
@@ -277,3 +313,26 @@ class ImageSidebar(QWidget):
     def _on_row_changed(self, row: int):
         if row >= 0:
             self.image_selected.emit(row)
+
+    def _on_context_menu(self, pos):
+        item = self._list.itemAt(pos)
+        if item is None:
+            return
+        row = self._list.row(item)
+        if row < 0:
+            return
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1e293b;
+                color: #e2e8f0;
+                border: 1px solid #334155;
+            }
+            QMenu::item:selected { background-color: #7c3aed; }
+        """)
+        delete_act = menu.addAction("Delete Image…")
+
+        action = menu.exec(self._list.mapToGlobal(pos))
+        if action == delete_act:
+            self.image_delete_requested.emit(row)

@@ -20,7 +20,7 @@ from app.sidebar_classes import ClassesSidebar
 from app.toolbar import AnnotateXToolbar
 from app.dialogs import (
     ClassAssignDialog, ExportDialog, SettingsDialog, NewProjectDialog,
-    AugmentDialog, BatchExportDialog,
+    AugmentDialog, BatchExportDialog, SplitDialog, ImportCocoDialog,
 )
 from app.train_dialog import TrainDialog
 from app.detection_dialog import DetectionDialog
@@ -107,6 +107,14 @@ class MainWindow(QMainWindow):
         self._act_save_as.triggered.connect(self.save_project_as)
         file_menu.addAction(self._act_save_as)
 
+        self._act_import_coco = QAction("Import COCO Dataset…", self)
+        self._act_import_coco.triggered.connect(self._import_coco)
+        file_menu.addAction(self._act_import_coco)
+
+        self._act_reimport_coco = QAction("Re-import COCO Labels into Current Project…", self)
+        self._act_reimport_coco.triggered.connect(self._reimport_coco)
+        file_menu.addAction(self._act_reimport_coco)
+
         file_menu.addSeparator()
 
         self._act_export = QAction("Export Dataset…", self)
@@ -117,7 +125,11 @@ class MainWindow(QMainWindow):
         self._act_augment.triggered.connect(self._show_augment)
         file_menu.addAction(self._act_augment)
 
-        self._act_batch_export = QAction("Batch Export (Multi-Project)…", self)
+        self._act_split = QAction("Split Dataset…", self)
+        self._act_split.triggered.connect(self._show_split)
+        file_menu.addAction(self._act_split)
+
+        self._act_batch_export = QAction("Merge Datasets (Multi-Project)…", self)
         self._act_batch_export.triggered.connect(self._show_batch_export)
         file_menu.addAction(self._act_batch_export)
 
@@ -164,6 +176,11 @@ class MainWindow(QMainWindow):
         del_act.setShortcut(QKeySequence("Delete"))
         del_act.triggered.connect(lambda: self._canvas.delete_selected() if self._canvas else None)
         edit_menu.addAction(del_act)
+
+        self._act_delete_image = QAction("Delete Current Image…", self)
+        self._act_delete_image.setShortcut(QKeySequence("Shift+Delete"))
+        self._act_delete_image.triggered.connect(self._delete_current_image)
+        edit_menu.addAction(self._act_delete_image)
 
         edit_menu.addSeparator()
         copy_prev_act = QAction("Copy Boxes from Previous Image", self)
@@ -226,6 +243,7 @@ class MainWindow(QMainWindow):
         # Left sidebar
         self._img_sidebar = ImageSidebar()
         self._img_sidebar.image_selected.connect(self._on_image_selected)
+        self._img_sidebar.image_delete_requested.connect(self._delete_image_at_index)
         content_layout.addWidget(self._img_sidebar)
 
         # Canvas
@@ -330,13 +348,30 @@ class MainWindow(QMainWindow):
         project.name = dlg.result_name
         project.image_folder = dlg.result_folder
 
-        for name in dlg.result_classes:
-            project.add_class(name)
-
         project.scan_images()
 
-        if hasattr(dlg, 'result_import_labels') and dlg.result_import_labels:
-            project.load_yolo_labels()
+        if dlg.result_coco_json:
+            # load_coco_labels sets up classes from the JSON — don't add_class manually
+            try:
+                stats = project.load_coco_labels(dlg.result_coco_json)
+                if stats["images_annotated"] == 0:
+                    QMessageBox.warning(
+                        self, "No Annotations Loaded",
+                        f"The COCO JSON was found but 0 images were matched.\n\n"
+                        f"JSON had {stats['total_json_images']} images, "
+                        f"project folder has {len(project.images)} images.\n\n"
+                        f"The project will open without annotations."
+                    )
+            except Exception as e:
+                QMessageBox.warning(self, "Label Import Warning",
+                                    f"Could not load COCO labels:\n{e}\n\n"
+                                    "Project will open without annotations.")
+        else:
+            # Normal path: add user-defined classes, then optionally import YOLO labels
+            for name in dlg.result_classes:
+                project.add_class(name)
+            if dlg.result_import_labels:
+                project.load_yolo_labels()
 
         # Ask for save location
         path, _ = QFileDialog.getSaveFileName(
@@ -348,6 +383,87 @@ class MainWindow(QMainWindow):
             add_recent_project(path)
 
         self._load_project(project)
+
+    def _import_coco(self):
+        if not self._confirm_unsaved():
+            return
+        dlg = ImportCocoDialog(self)
+        if dlg.exec() != ImportCocoDialog.DialogCode.Accepted:
+            return
+
+        project = Project()
+        project.name = dlg.result_name
+        project.image_folder = dlg.result_folder
+        project.scan_images()
+
+        try:
+            stats = project.load_coco_labels(dlg.result_json)
+        except Exception as e:
+            QMessageBox.critical(self, "Import Error", f"Failed to load COCO labels:\n{e}")
+            return
+
+        msg = (
+            f"Import complete!\n\n"
+            f"Images annotated: {stats['images_annotated']}\n"
+            f"Total annotations: {stats['annotations']}\n"
+            f"Classes: {stats['classes']}\n\n"
+            f"Save the project to a .annotatex file."
+        )
+        QMessageBox.information(self, "Import Complete", msg)
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Project", dlg.result_name + ".annotatex",
+            "AnnotateX Project (*.annotatex)"
+        )
+        if path:
+            project.save(path)
+            add_recent_project(path)
+
+        self._load_project(project)
+
+    def _reimport_coco(self):
+        """Re-run COCO label import into the currently open project."""
+        if not self._project:
+            QMessageBox.information(self, "No Project", "Please open a project first.")
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select COCO JSON", self._project.image_folder,
+            "COCO JSON (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            stats = self._project.load_coco_labels(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Import Error", f"Failed to load COCO labels:\n{e}")
+            return
+
+        if stats["images_annotated"] == 0:
+            QMessageBox.warning(
+                self, "No Matches Found",
+                f"0 images were annotated.\n\n"
+                f"The COCO JSON contained {stats.get('total_json_images', '?')} images "
+                f"but none of their filenames matched the {len(self._project.images)} "
+                f"images in the project folder.\n\n"
+                f"Make sure the JSON was exported for the same folder."
+            )
+            return
+
+        # Refresh all UI after import
+        self._project.invalidate_annotated_count()
+        self._cls_sidebar.load_project(self._project)
+        self._img_sidebar.refresh_all_badges()
+        self._canvas.reload_annotations()
+        self._update_progress()
+        if self._project.path:
+            self._project.save()
+
+        QMessageBox.information(
+            self, "Re-import Complete",
+            f"Images annotated: {stats['images_annotated']}\n"
+            f"Total annotations: {stats['annotations']}\n"
+            f"Classes: {stats['classes']}"
+        )
 
     def open_project(self):
         if not self._confirm_unsaved():
@@ -463,6 +579,73 @@ class MainWindow(QMainWindow):
     def _next_image(self):
         if self._project:
             self._navigate_to(self._project.current_index + 1)
+
+    def _delete_current_image(self):
+        """Delete the currently selected image from disk and remove it from project."""
+        if not self._project:
+            return
+        self._delete_image_at_index(self._project.current_index)
+
+    def _delete_image_at_index(self, idx: int):
+        if not self._project or not self._project.images:
+            QMessageBox.information(self, "No Image", "There is no image to delete.")
+            return
+        if idx < 0 or idx >= len(self._project.images):
+            return
+
+        fn = self._project.images[idx]
+
+        image_path = self._project.image_path(fn)
+        label_path = os.path.join(self._project.image_folder, os.path.splitext(fn)[0] + ".txt")
+
+        reply = QMessageBox.warning(
+            self,
+            "Delete Image",
+            f"Delete this image permanently from disk?\n\n{fn}\n\n"
+            "Its annotations in this project will also be removed.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            if os.path.exists(image_path):
+                os.remove(image_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Delete Failed", f"Could not delete image file:\n{e}")
+            return
+
+        # Optional cleanup: if a YOLO sidecar label exists, remove it too.
+        try:
+            if os.path.exists(label_path):
+                os.remove(label_path)
+        except Exception:
+            pass
+
+        self._project.annotations.pop(fn, None)
+        del self._project.images[idx]
+        self._project.modified = True
+        self._project.invalidate_annotated_count()
+
+        # Remove one row in-place (faster than rebuilding the whole sidebar).
+        self._img_sidebar.remove_image_at(idx)
+
+        if not self._project.images:
+            self._project.current_index = 0
+            self._canvas.load_image("")
+            self._cls_sidebar.refresh_annotations()
+            self._cls_sidebar.update_class_counts()
+            self._status_img.setText("Image: —")
+            self._status_boxes.setText("Boxes: —")
+            self._update_progress()
+            self._update_title()
+            return
+
+        self._project.current_index = min(idx, len(self._project.images) - 1)
+        self._navigate_to(self._project.current_index)
+        self._cls_sidebar.refresh_annotations()
+        self._cls_sidebar.update_class_counts()
+        self._update_title()
 
     def _copy_boxes_from_prev(self):
         """Copy all bounding boxes from the previous image onto the current image."""
@@ -667,6 +850,9 @@ class MainWindow(QMainWindow):
         if total > 0:
             self._progress_bar.setMaximum(total)
             self._progress_bar.setValue(annotated)
+        else:
+            self._progress_bar.setMaximum(1)
+            self._progress_bar.setValue(0)
 
     def _update_title(self):
         if self._project:
@@ -687,6 +873,10 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No Project", "Please open a project first.")
             return
         dlg = AugmentDialog(self._project, self)
+        dlg.exec()
+
+    def _show_split(self):
+        dlg = SplitDialog(self)
         dlg.exec()
 
     def _show_batch_export(self):
@@ -753,6 +943,20 @@ class MainWindow(QMainWindow):
         if not self._confirm_unsaved():
             event.ignore()
             return
+        # Stop all detection services (releases RTSP caps, shuts down HTTP/Flask
+        # servers, joins threads, flushes GPU memory) and the result receiver
+        # before the Qt event loop exits — otherwise werkzeug sockets keep the
+        # Python process alive on Windows even after the window closes.
+        self._detect_poll_timer.stop()
+        try:
+            get_registry().stop_all()
+        except Exception:
+            pass
+        try:
+            from app.result_receiver import get_receiver
+            get_receiver().stop()
+        except Exception:
+            pass
         event.accept()
 
     def keyPressEvent(self, event):

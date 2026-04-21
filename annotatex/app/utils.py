@@ -384,6 +384,106 @@ def _write_label_batch(path: Path, boxes: list):
             f.write(b.to_yolo_line() + "\n")
 
 
+# ── Dataset split ─────────────────────────────────────────────────────────────
+
+def split_dataset(folder: str, split: dict, generate_yaml: bool = True) -> dict:
+    """
+    Partition a flat YOLO dataset folder into train / val / (optional) test subfolders.
+
+    Expects:
+        <folder>/images/   — all image files
+        <folder>/labels/   — matching .txt label files
+        <folder>/classes.txt — class names (used for data.yaml)
+
+    Files are *moved* (not copied), so no extra disk space is required.
+    The now-empty images/ and labels/ directories are removed afterwards.
+
+    split: e.g. {"train": 0.8, "val": 0.1, "test": 0.1}
+           Values are normalised internally, so they don't need to sum to 1.
+
+    Returns stats dict: {"total": N, "train": n, "val": n, "test": n}
+    """
+    folder = Path(folder)
+    img_dir = folder / "images"
+    lbl_dir = folder / "labels"
+
+    if not img_dir.exists():
+        raise FileNotFoundError(f"No 'images' subfolder found in {folder}")
+
+    IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
+    image_files = sorted(
+        p.name for p in img_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS
+    )
+    if not image_files:
+        raise ValueError("No image files found in images/ folder.")
+
+    splits = list(split.keys())
+    raw_ratios = list(split.values())
+    total_ratio = sum(raw_ratios)
+    ratios = [r / total_ratio for r in raw_ratios]
+
+    random.seed(42)
+    random.shuffle(image_files)
+
+    # Partition image list
+    partitions: dict[str, list[str]] = {}
+    idx = 0
+    for i, sp in enumerate(splits):
+        if i == len(splits) - 1:
+            partitions[sp] = image_files[idx:]
+        else:
+            count = int(len(image_files) * ratios[i])
+            partitions[sp] = image_files[idx:idx + count]
+            idx += count
+
+    stats: dict[str, int] = {"total": len(image_files)}
+    for sp in splits:
+        stats[sp] = 0
+
+    for sp, files in partitions.items():
+        sp_img = folder / sp / "images"
+        sp_lbl = folder / sp / "labels"
+        sp_img.mkdir(parents=True, exist_ok=True)
+        sp_lbl.mkdir(parents=True, exist_ok=True)
+
+        for fn in files:
+            src_img = img_dir / fn
+            if src_img.exists():
+                shutil.move(str(src_img), str(sp_img / fn))
+
+            stem = Path(fn).stem
+            src_lbl = lbl_dir / (stem + ".txt")
+            if src_lbl.exists():
+                shutil.move(str(src_lbl), str(sp_lbl / (stem + ".txt")))
+
+            stats[sp] += 1
+
+    # Remove now-empty flat directories (silently leave them if non-empty)
+    for d in (img_dir, lbl_dir):
+        try:
+            d.rmdir()
+        except OSError:
+            pass
+
+    # Read class names for data.yaml
+    class_names: list[str] = []
+    classes_txt = folder / "classes.txt"
+    if classes_txt.exists():
+        with open(classes_txt) as f:
+            class_names = [line.strip() for line in f if line.strip()]
+
+    if generate_yaml:
+        yaml_path = folder / "data.yaml"
+        with open(yaml_path, "w") as f:
+            f.write(f"path: {folder.resolve()}\n")
+            for sp in splits:
+                f.write(f"{sp}: {sp}/images\n")
+            f.write(f"\nnc: {len(class_names)}\n")
+            f.write(f"names: {class_names}\n")
+
+    return stats
+
+
 # ── Recent projects ───────────────────────────────────────────────────────────
 
 RECENT_PROJECTS_FILE = Path.home() / ".annotatex_recent.json"

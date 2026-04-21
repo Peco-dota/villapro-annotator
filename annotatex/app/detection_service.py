@@ -1,8 +1,9 @@
 """Real-time detection service for VisionQ.
 
-Two input modes:
-  HTTP — Runs a Flask HTTP server. Accepts POST /detect with multipart form-data (3-5 images).
-  RTSP — Connects to an IP camera via RTSP, pulls frames continuously.
+Three input modes:
+    HTTP  — Runs a Flask HTTP server. Accepts POST /detect with multipart form-data (3-5 images).
+    RTSP  — Connects to an IP camera via RTSP, pulls frames continuously.
+    VIDEO — Reads frames from a local video file and processes it like a live source.
 
 In both modes YOLO inference is run, direction is determined, and results are pushed
 to the configured output URL.  Multiple named service instances can run simultaneously.
@@ -12,6 +13,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import queue
 import socket
 import threading
 import time
@@ -29,21 +31,38 @@ log = logging.getLogger("detection_service")
 
 _PERSIST_PATH = os.path.expanduser("~/.visionq_services.json")
 _MAX_LOG = 50
-_FRAMES_DIR = os.path.expanduser("C:/Skola/villapro-annotator/annotatex/app/frames")
+_MISS_TOLERANCE = 2       # consecutive frames without a car before buffer is cleared
+_MIN_DIR_FRAMES = 4       # minimum frames in buffer before direction is considered reliable
 
 
-def _save_detection_frame(frame_np, service_name: str, car_detected: bool, frames_dir: str = _FRAMES_DIR):
-    """Save a frame to <frames_dir>/<service_name>/."""
+def _best_device() -> str:
+    """Return 'cuda', 'mps', or 'cpu' depending on what's available."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+        if torch.backends.mps.is_available():
+            return "mps"
+    except Exception:
+        pass
+    return "cpu"
+
+
+def _save_dataset_frame(frame_np, service_name: str, dataset_dir: str):
+    """Save a raw frame (no label) for later annotation.
+
+    Frames are written as <dataset_dir>/<service_name>/<timestamp>.jpg.
+    The timestamp makes them chronologically sortable and avoids collisions.
+    """
     try:
         import cv2
-        label = "car" if car_detected else "nocar"
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-        folder = os.path.join(frames_dir, service_name)
+        folder = os.path.join(dataset_dir, service_name)
         os.makedirs(folder, exist_ok=True)
-        path = os.path.join(folder, f"{ts}_{label}.jpg")
+        path = os.path.join(folder, f"{ts}.jpg")
         cv2.imwrite(path, frame_np)
     except Exception as e:
-        log.warning(f"Failed to save detection frame: {e}")
+        log.warning(f"Failed to save dataset frame: {e}")
 
 
 # ── Config dataclass ────────────────────────────────────────────────────────────
@@ -58,6 +77,8 @@ class ServiceConfig:
     # Result push destination (both modes)
     output_host: str
     output_port: int
+    # Input source mode: "http" | "rtsp" | "video"
+    input_mode: str = "http"
     auto_start: bool = False
     # RTSP source (used when rtsp_enabled=True)
     rtsp_enabled: bool = False
@@ -67,10 +88,19 @@ class ServiceConfig:
     rtsp_port: int = 554
     rtsp_channel: str = "Streaming/Channels/102"
     rtsp_interval: float = 0.25  # seconds between frame grabs (0.25 = 4 fps)
+    # Video file source (used when input_mode="video")
+    video_path: str = ""
+    video_loop: bool = True
     conf_threshold: float = 0.5
-    report_only_with_direction: bool = False
-    save_frames: bool = True
-    frames_dir: str = _FRAMES_DIR
+    strict_output: bool = False        # only emit when direction is known; emit "no_car" when absent
+    state_changes_only: bool = False   # only emit when state transitions (forward→idle, idle→no_car, etc.)
+    # Dataset capture: save raw frames at a fixed interval for later annotation
+    dataset_capture: bool = False
+    dataset_interval: int = 10  # save every Nth processed frame (RTSP) or every Nth image (HTTP)
+    dataset_dir: str = ""       # folder to write dataset frames
+    # Input recording: save raw stream/video frames to a local video file
+    record_stream: bool = False
+    record_dir: str = ""
 
     @property
     def rtsp_url(self) -> str:
@@ -84,25 +114,37 @@ class ServiceConfig:
 
     @staticmethod
     def from_dict(d: dict) -> "ServiceConfig":
+        input_mode = str(d.get("input_mode", "")).strip().lower()
+        if input_mode not in {"http", "rtsp", "video"}:
+            input_mode = "rtsp" if d.get("rtsp_enabled", False) else "http"
+
         return ServiceConfig(
             name=d["name"],
             model_path=d["model_path"],
+            input_mode=input_mode,
             input_host=d.get("input_host", "0.0.0.0"),
             input_port=d["input_port"],
             output_host=d.get("output_host", "127.0.0.1"),
             output_port=d["output_port"],
             auto_start=d.get("auto_start", False),
-            rtsp_enabled=d.get("rtsp_enabled", False),
+            rtsp_enabled=(input_mode == "rtsp"),
             rtsp_user=d.get("rtsp_user", ""),
             rtsp_password=d.get("rtsp_password", ""),
             rtsp_ip=d.get("rtsp_ip", ""),
             rtsp_port=d.get("rtsp_port", 554),
             rtsp_channel=d.get("rtsp_channel", "Streaming/Channels/102"),
             rtsp_interval=d.get("rtsp_interval", 0.5),
+            video_path=d.get("video_path", ""),
+            video_loop=d.get("video_loop", True),
             conf_threshold=d.get("conf_threshold", 0.5),
-            report_only_with_direction=d.get("report_only_with_direction", False),
-            save_frames=d.get("save_frames", True),
-            frames_dir=d.get("frames_dir", _FRAMES_DIR),
+            # "report_only_with_direction" is the old key — keep reading it so saved configs still work
+            strict_output=d.get("strict_output", d.get("report_only_with_direction", False)),
+            state_changes_only=d.get("state_changes_only", False),
+            dataset_capture=d.get("dataset_capture", False),
+            dataset_interval=d.get("dataset_interval", 10),
+            dataset_dir=d.get("dataset_dir", ""),
+            record_stream=d.get("record_stream", False),
+            record_dir=d.get("record_dir", ""),
         )
 
 
@@ -143,30 +185,105 @@ def _bbox_area(box) -> float:
     return (x2 - x1) * (y2 - y1)
 
 
-def _largest_box(result):
+def _bbox_centroid(box) -> tuple[float, float]:
+    x1, y1, x2, y2 = box.xyxy[0].tolist()
+    return ((x1 + x2) / 2, (y1 + y2) / 2)
+
+
+def _largest_box(result, class_name: str | None = None):
     if result.boxes is None or len(result.boxes) == 0:
         return None
-    return max(result.boxes, key=lambda b: _bbox_area(b))
+    boxes = list(result.boxes)
+    if class_name is not None:
+        target_ids = {cid for cid, n in result.names.items() if n == class_name}
+        boxes = [b for b in boxes if int(b.cls[0]) in target_ids]
+    if not boxes:
+        return None
+    return max(boxes, key=lambda b: _bbox_area(b))
 
 
-def _determine_direction(areas: list[float]) -> str:
-    if len(areas) < 2:
-        return "unknown"
-    n = len(areas)
-    x = list(range(n))
-    x_mean = sum(x) / n
-    y_mean = sum(areas) / n
-    numerator = sum((x[i] - x_mean) * (areas[i] - y_mean) for i in range(n))
-    denominator = sum((x[i] - x_mean) ** 2 for i in range(n))
-    if denominator == 0:
-        return "unknown"
-    slope = numerator / denominator
-    threshold = y_mean * 0.01
-    if slope > threshold:
+def _determine_direction(history: list[tuple[float, float, float]]) -> str:
+    """Determine direction from a history of (cx, cy, area) tuples.
+
+    Uses linear regression on three signals independently, then votes:
+      - cx  decreasing (moving left)  → forward point
+      - cy  increasing (moving down)  → forward point
+      - area increasing (getting bigger) → forward point
+    2+ signals agree → forward / backward.  Otherwise → idle.
+
+    Camera assumption: cars enter upper-right and move diagonally toward
+    lower-left when driving forward (approaching the gate).
+    """
+    if len(history) < _MIN_DIR_FRAMES:
+        return "idle"
+
+    n = len(history)
+    t = list(range(n))
+    t_mean = (n - 1) / 2.0
+    t_den = sum((t[i] - t_mean) ** 2 for i in range(n))
+    if t_den == 0:
+        return "idle"
+
+    def _slope(vals: list[float]) -> float:
+        v_mean = sum(vals) / n
+        return sum((t[i] - t_mean) * (vals[i] - v_mean) for i in range(n)) / t_den
+
+    cxs   = [h[0] for h in history]
+    cys   = [h[1] for h in history]
+    areas = [h[2] for h in history]
+
+    cx_mean   = sum(cxs)   / n
+    cy_mean   = sum(cys)   / n
+    area_mean = sum(areas) / n
+
+    # Normalize: slope as a fraction of the signal's mean (relative rate of change per frame)
+    THRESHOLD = 0.01  # 1% of mean per frame
+    cx_rel   = _slope(cxs)   / cx_mean   if cx_mean   > 0 else 0.0
+    cy_rel   = _slope(cys)   / cy_mean   if cy_mean   > 0 else 0.0
+    area_rel = _slope(areas) / area_mean if area_mean > 0 else 0.0
+
+    # Score: +1 = forward signal, -1 = backward signal
+    score = 0
+    if cx_rel < -THRESHOLD:    # moving left  → forward
+        score += 1
+    elif cx_rel > THRESHOLD:   # moving right → backward
+        score -= 1
+
+    if cy_rel > THRESHOLD:     # moving down  → forward
+        score += 1
+    elif cy_rel < -THRESHOLD:  # moving up    → backward
+        score -= 1
+
+    if area_rel > THRESHOLD:   # getting bigger  → forward
+        score += 1
+    elif area_rel < -THRESHOLD:  # getting smaller → backward
+        score -= 1
+
+    if score >= 2:
+        # A clearly shrinking box means the car is getting farther away — physically
+        # impossible to be moving forward. Clamp to idle to avoid false "forward"
+        # when only the rear bumper is drifting out through the lower-left corner.
+        if area_rel < -THRESHOLD:
+            return "idle"
         return "forward"
-    elif slope < -threshold:
+    if score <= -3:   # all 3 signals must agree — backward is intentionally harder to trigger
         return "backward"
-    return "unknown"
+    return "idle"
+
+
+def _invert_direction(direction: str) -> str:
+    """Flip forward↔backward for car_rear detections.
+
+    The direction algorithm assumes 'box getting bigger = car approaching = forward'.
+    For car_rear this is physically inverted: a growing rear box means the car is
+    reversing toward the camera (backward), and a shrinking one means it's driving
+    away (forward).
+    """
+    if direction == "forward":
+        return "backward"
+    if direction == "backward":
+        return "forward"
+    return direction  # idle / no_car unchanged
 
 
 # ── Request log entry ──────────────────────────────────────────────────────────
@@ -174,19 +291,27 @@ def _determine_direction(areas: list[float]) -> str:
 @dataclass
 class LogEntry:
     timestamp: str
-    car_detected: bool
-    direction: str
-    confidence: float
-    frames: int
+    car_detected: bool = False
+    car_direction: str = ""
+    car_confidence: float = 0.0
+    rear_detected: bool = False
+    rear_direction: str = ""
+    rear_confidence: float = 0.0
+    frames: int = 0
     error: str = ""
 
     @staticmethod
     def from_result(payload: dict) -> "LogEntry":
+        car = payload.get("car", {})
+        rear = payload.get("car_rear", {})
         return LogEntry(
             timestamp=datetime.now().strftime("%H:%M:%S"),
-            car_detected=payload.get("car_detected", False),
-            direction=payload.get("direction", "unknown"),
-            confidence=payload.get("confidence", 0.0),
+            car_detected=car.get("detected", False),
+            car_direction=car.get("direction", ""),
+            car_confidence=car.get("confidence", 0.0),
+            rear_detected=rear.get("detected", False),
+            rear_direction=rear.get("direction", ""),
+            rear_confidence=rear.get("confidence", 0.0),
             frames=payload.get("frames_analyzed", 0),
         )
 
@@ -194,22 +319,21 @@ class LogEntry:
     def from_error(msg: str) -> "LogEntry":
         return LogEntry(
             timestamp=datetime.now().strftime("%H:%M:%S"),
-            car_detected=False,
-            direction="",
-            confidence=0.0,
-            frames=0,
             error=msg,
         )
 
     def __str__(self) -> str:
         if self.error:
             return f"[{self.timestamp}]  ERROR: {self.error}"
-        detected = "CAR" if self.car_detected else "no car"
-        return (
-            f"[{self.timestamp}]  {detected}"
-            + (f"  {self.direction}  conf={self.confidence:.2f}  frames={self.frames}"
-               if self.car_detected else f"  frames={self.frames}")
+        car_part = (
+            f"car={self.car_direction}({self.car_confidence:.2f})"
+            if self.car_detected else "car=no_car"
         )
+        rear_part = (
+            f"rear={self.rear_direction}({self.rear_confidence:.2f})"
+            if self.rear_detected else "rear=no_car"
+        )
+        return f"[{self.timestamp}]  {car_part}  {rear_part}  frames={self.frames}"
 
 
 # ── Flask app factory (HTTP mode) ──────────────────────────────────────────────
@@ -220,13 +344,17 @@ def _make_flask_app(
     output_url: Optional[str],
     log_callback: Callable[[LogEntry], None],
     conf_threshold: float = 0.5,
-    report_only_with_direction: bool = False,
-    save_frames: bool = True,
-    frames_dir: str = _FRAMES_DIR,
+    strict_output: bool = False,
+    state_changes_only: bool = False,
+    dataset_capture: bool = False,
+    dataset_interval: int = 10,
+    dataset_dir: str = "",
 ):
     from flask import Flask, request, jsonify
     app = Flask(f"detection_service_{service_name}")
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
+    # Per-class state for state_changes_only mode (persists across HTTP requests)
+    _http_state: dict = {"car": "", "car_rear": ""}
 
     @app.route("/detect", methods=["POST"])
     def detect():
@@ -242,11 +370,11 @@ def _make_flask_app(
             log_callback(entry)
             return jsonify({"error": "No images provided"}), 400
 
-        areas: list[float] = []
-        confidences: list[float] = []
-        car_detected = False
+        # Per-class histories of (cx, cy, area) tuples
+        histories:    dict[str, list] = {"car": [], "car_rear": []}
+        confidences:  dict[str, list] = {"car": [], "car_rear": []}
 
-        for f in files:
+        for http_frame_idx, f in enumerate(files):
             try:
                 img = Image.open(io.BytesIO(f.read())).convert("RGB")
                 img_np = np.array(img)
@@ -254,44 +382,76 @@ def _make_flask_app(
                 log.warning(f"Failed to decode image: {e}")
                 continue
 
-            results = model(img_np, conf=conf_threshold, verbose=False)
+            if dataset_capture and dataset_dir and (http_frame_idx % dataset_interval == 0):
+                _save_dataset_frame(img_np[:, :, ::-1], service_name, dataset_dir)
+
+            import torch as _torch
+            with _torch.no_grad():
+                results = model(img_np, conf=conf_threshold, verbose=False)
             if not results:
-                if save_frames:
-                    _save_detection_frame(
-                        img_np[:, :, ::-1],  # RGB→BGR for cv2
-                        service_name, False, frames_dir,
-                    )
                 continue
 
             result = results[0]
-            box = _largest_box(result)
-            frame_has_car = box is not None
-            if frame_has_car:
-                car_detected = True
-                areas.append(_bbox_area(box))
-                confidences.append(float(box.conf[0]))
-            if save_frames:
-                _save_detection_frame(
-                    img_np[:, :, ::-1],  # RGB→BGR for cv2
-                    service_name, frame_has_car, frames_dir,
-                )
+            for cls_name in ("car", "car_rear"):
+                box = _largest_box(result, cls_name)
+                if box is not None:
+                    cx, cy = _bbox_centroid(box)
+                    histories[cls_name].append((cx, cy, _bbox_area(box)))
+                    confidences[cls_name].append(float(box.conf[0]))
+            del results
 
-        direction = _determine_direction(areas) if car_detected else "unknown"
-        avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+        def _resolve(cls_name: str) -> dict:
+            hist = histories[cls_name]
+            confs = confidences[cls_name]
+            detected = bool(hist)
+            if not detected:
+                current_state = "no_car"
+            elif len(hist) >= _MIN_DIR_FRAMES:
+                raw = _determine_direction(hist)
+                current_state = _invert_direction(raw) if cls_name == "car_rear" else raw
+            else:
+                current_state = None  # still building
+            avg_conf = round(sum(confs) / len(confs), 4) if confs else 0.0
+            return {
+                "detected": detected,
+                "direction": current_state if current_state is not None else "idle",
+                "confidence": avg_conf,
+                "_current_state": current_state,
+            }
+
+        car_res  = _resolve("car")
+        rear_res = _resolve("car_rear")
 
         payload = {
             "service_name": service_name,
-            "car_detected": car_detected,
-            "direction": direction,
-            "confidence": round(avg_confidence, 4),
+            "car": {
+                "detected":   car_res["detected"],
+                "direction":  car_res["direction"],
+                "confidence": car_res["confidence"],
+            },
+            "car_rear": {
+                "detected":   rear_res["detected"],
+                "direction":  rear_res["direction"],
+                "confidence": rear_res["confidence"],
+            },
             "frames_analyzed": len(files),
-            "frames_with_car": len(areas),
         }
 
-        should_report = (
-            not report_only_with_direction
-            or (car_detected and direction != "unknown")
-        )
+        if state_changes_only:
+            should_report = False
+            for cls_name, res in (("car", car_res), ("car_rear", rear_res)):
+                cs = res["_current_state"]
+                if cs is not None and cs != _http_state[cls_name]:
+                    _http_state[cls_name] = cs
+                    should_report = True
+        elif strict_output:
+            car_ok  = car_res["detected"]  and car_res["_current_state"]  is not None
+            rear_ok = rear_res["detected"] and rear_res["_current_state"] is not None
+            no_car  = not car_res["detected"] and not rear_res["detected"]
+            should_report = car_ok or rear_ok or no_car
+        else:
+            should_report = True
+
         if should_report:
             log_callback(LogEntry.from_result(payload))
             if output_url:
@@ -335,9 +495,40 @@ class DetectionService:
         self._request_log: deque[LogEntry] = deque(maxlen=_MAX_LOG)
         self._log_lock = threading.Lock()
         self._stop_event = threading.Event()
-        # Rolling buffer of bbox areas for direction tracking (RTSP mode)
-        self._area_buffer: deque[float] = deque(maxlen=8)
+        # Per-class tracking state for direction (RTSP/video mode)
+        self._class_state: dict[str, dict] = self._make_class_state()
+        # Live preview — processing thread puts annotated frames here;
+        # the Qt main thread polls and renders them (maxsize=1 keeps only latest)
+        self._preview_enabled: bool = False
+        self._preview_queue: queue.Queue = queue.Queue(maxsize=1)
+        # Dataset capture counter (RTSP mode): increments each processed frame
+        self._dataset_frame_count: int = 0
         self._on_state_change: Optional[Callable[[], None]] = None
+        # RTSP reader thread + active cap reference (kept so stop() can force-release the cap)
+        self._reader_thread: Optional[threading.Thread] = None
+        self._cap_lock = threading.Lock()
+        self._active_cap = None
+        # RTSP recording state
+        self._video_writer = None
+        self._video_lock = threading.Lock()
+        self._recording_path: str = ""
+        self._record_enabled: bool = False
+        self._record_dir_cfg: str = ""
+        # Video playback control state (video input mode only)
+        self._video_state_lock = threading.Lock()
+        self._video_speed: float = 1.0
+        self._video_seek_target_ms: float = -1.0  # -1 = no pending seek
+        self._video_pos_ms: float = 0.0
+        self._video_duration_ms: float = 0.0
+        self._video_paused: bool = False
+        self._video_step: bool = False  # step one frame while paused
+
+    @staticmethod
+    def _make_class_state() -> dict:
+        return {
+            cls: {"buffer": deque(maxlen=8), "misses": 0, "last_state": ""}
+            for cls in ("car", "car_rear")
+        }
 
     @property
     def state(self) -> str:
@@ -378,7 +569,12 @@ class DetectionService:
         self._state = STATE_LOADING
         self._error_msg = ""
         self._config = cfg
-        self._area_buffer.clear()
+        self._class_state = self._make_class_state()
+        self._dataset_frame_count = 0
+        mode = (cfg.input_mode or ("rtsp" if cfg.rtsp_enabled else "http")).lower()
+        self._record_enabled = bool(cfg.record_stream and mode in ("rtsp", "video"))
+        self._record_dir_cfg = cfg.record_dir
+        self._close_video_writer()
 
         def _worker():
             error = self._do_start(cfg)
@@ -394,8 +590,11 @@ class DetectionService:
         t.start()
 
     def _do_start(self, cfg: ServiceConfig) -> str:
-        if cfg.rtsp_enabled:
+        mode = (cfg.input_mode or ("rtsp" if cfg.rtsp_enabled else "http")).lower()
+        if mode == "rtsp":
             return self._do_start_rtsp(cfg)
+        if mode == "video":
+            return self._do_start_video(cfg)
         return self._do_start_http(cfg)
 
     # ── HTTP mode ──────────────────────────────────────────────────────────────
@@ -403,7 +602,10 @@ class DetectionService:
     def _do_start_http(self, cfg: ServiceConfig) -> str:
         try:
             from ultralytics import YOLO
+            device = _best_device()
             model = YOLO(cfg.model_path)
+            model.to(device)
+            log.info(f"[{cfg.name}] Model loaded on {device.upper()}")
             self._model_holder["model"] = model
         except Exception as e:
             return f"Failed to load model: {e}"
@@ -415,9 +617,11 @@ class DetectionService:
         app = _make_flask_app(
             cfg.name, self._model_holder, output_url, self._append_log,
             conf_threshold=cfg.conf_threshold,
-            report_only_with_direction=cfg.report_only_with_direction,
-            save_frames=cfg.save_frames,
-            frames_dir=cfg.frames_dir,
+            strict_output=cfg.strict_output,
+            state_changes_only=cfg.state_changes_only,
+            dataset_capture=cfg.dataset_capture,
+            dataset_interval=cfg.dataset_interval,
+            dataset_dir=cfg.dataset_dir,
         )
 
         from werkzeug.serving import make_server
@@ -440,7 +644,10 @@ class DetectionService:
     def _do_start_rtsp(self, cfg: ServiceConfig) -> str:
         try:
             from ultralytics import YOLO
+            device = _best_device()
             model = YOLO(cfg.model_path)
+            model.to(device)
+            log.info(f"[{cfg.name}] Model loaded on {device.upper()}")
             self._model_holder["model"] = model
         except Exception as e:
             return f"Failed to load model: {e}"
@@ -480,10 +687,16 @@ class DetectionService:
             import cv2 as _cv2
             _cap = _cv2.VideoCapture(rtsp_url, _cv2.CAP_FFMPEG)
             _cap.set(_cv2.CAP_PROP_BUFFERSIZE, 1)
+            with self._cap_lock:
+                self._active_cap = _cap
             consecutive_fails = 0
 
             while not self._stop_event.is_set():
-                ret, frame = _cap.read()
+                try:
+                    ret, frame = _cap.read()
+                except Exception:
+                    # cap was force-released by stop() while read() was blocking
+                    break
                 if not ret:
                     consecutive_fails += 1
                     log.warning(f"[{cfg.name}] Frame read failed ({consecutive_fails}), reconnecting…")
@@ -494,6 +707,8 @@ class DetectionService:
                         break
                     _cap = _cv2.VideoCapture(rtsp_url, _cv2.CAP_FFMPEG)
                     _cap.set(_cv2.CAP_PROP_BUFFERSIZE, 1)
+                    with self._cap_lock:
+                        self._active_cap = _cap
                     continue
 
                 consecutive_fails = 0
@@ -502,9 +717,14 @@ class DetectionService:
                     latest["ok"] = True
 
             _cap.release()
+            with self._cap_lock:
+                self._active_cap = None
 
         def _loop():
             """Processes the latest available frame at the configured interval."""
+            import torch
+            _frame_count_local = 0
+
             while not self._stop_event.is_set():
                 self._stop_event.wait(timeout=cfg.rtsp_interval)
 
@@ -520,63 +740,514 @@ class DetectionService:
                     break
 
                 try:
-                    results = m(frame, conf=cfg.conf_threshold, verbose=False)
-                    self._process_rtsp_frame(
+                    with torch.no_grad():
+                        results = m(frame, conf=cfg.conf_threshold, verbose=False)
+                    self._dataset_frame_count += 1
+                    frame_summary = self._process_rtsp_frame(
                         results, frame, output_url, cfg.name,
-                        cfg.report_only_with_direction,
-                        cfg.save_frames, cfg.frames_dir,
+                        cfg.strict_output,
+                        cfg.state_changes_only,
+                        cfg.dataset_capture, cfg.dataset_interval,
+                        cfg.dataset_dir, self._dataset_frame_count,
                     )
+                    if self._record_enabled:
+                        self._record_input_frame(
+                            service_name=cfg.name,
+                            frame=frame,
+                            record_dir=self._record_dir_cfg,
+                        )
+                    if self._preview_enabled and results:
+                        try:
+                            self._preview_queue.put_nowait(results[0].plot())
+                        except queue.Full:
+                            pass  # Qt hasn't consumed last frame yet — drop this one
                 except Exception as e:
                     self._append_log(LogEntry.from_error(str(e)))
+                finally:
+                    # Explicitly release result tensors — YOLO results hold GPU memory
+                    # and Python's GC won't always collect them promptly in a tight loop
+                    try:
+                        del results
+                    except NameError:
+                        pass
+                    _frame_count_local += 1
+                    # Periodically flush the CUDA cache to prevent silent accumulation
+                    if _frame_count_local % 500 == 0 and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
-        reader_thread = threading.Thread(target=_reader, daemon=True, name=f"RTSPReader-{cfg.name}")
-        reader_thread.start()
+        self._reader_thread = threading.Thread(target=_reader, daemon=True, name=f"RTSPReader-{cfg.name}")
+        self._reader_thread.start()
 
         self._thread = threading.Thread(target=_loop, daemon=True, name=f"RTSPThread-{cfg.name}")
         self._thread.start()
         return ""
 
+    def _do_start_video(self, cfg: ServiceConfig) -> str:
+        try:
+            from ultralytics import YOLO
+            device = _best_device()
+            model = YOLO(cfg.model_path)
+            model.to(device)
+            log.info(f"[{cfg.name}] Model loaded on {device.upper()}")
+            self._model_holder["model"] = model
+        except Exception as e:
+            return f"Failed to load model: {e}"
+
+        import cv2
+
+        video_path = cfg.video_path.strip()
+        if not video_path:
+            self._model_holder["model"] = None
+            return "Video file path is required for video input mode."
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            cap.release()
+            self._model_holder["model"] = None
+            return (
+                f"Cannot open video file.\n"
+                f"Path: {video_path}\n\n"
+                f"Check file path, permissions, and codec support."
+            )
+        cap.release()
+
+        output_url = (
+            f"http://{cfg.output_host}:{cfg.output_port}/result"
+            if cfg.output_host else None
+        )
+
+        self._stop_event.clear()
+
+        # Shared latest frame between reader and processing threads
+        latest: dict = {"frame": None, "ok": False}
+        latest_lock = threading.Lock()
+
+        def _reader():
+            """Read video frames and loop to the beginning at EOF (demo mode)."""
+            import cv2 as _cv2
+
+            _cap = _cv2.VideoCapture(video_path)
+            with self._cap_lock:
+                self._active_cap = _cap
+
+            # Determine total duration for the progress slider
+            _fps = _cap.get(_cv2.CAP_PROP_FPS) or 25.0
+            _frame_count = _cap.get(_cv2.CAP_PROP_FRAME_COUNT)
+            with self._video_state_lock:
+                self._video_duration_ms = (_frame_count / _fps * 1000.0) if _frame_count > 0 else 0.0
+                self._video_speed = 1.0
+                self._video_seek_target_ms = -1.0
+                self._video_pos_ms = 0.0
+                self._video_paused = False
+                self._video_step = False
+
+            loop_count = 0
+            while not self._stop_event.is_set():
+                # Read shared state atomically
+                with self._video_state_lock:
+                    seek_target = self._video_seek_target_ms
+                    speed = self._video_speed
+                    paused = self._video_paused
+                    step = self._video_step
+                    if step:
+                        self._video_step = False  # consume the step request
+
+                # While paused and no step/seek pending: idle and poll for changes
+                if paused and not step and seek_target < 0:
+                    self._stop_event.wait(timeout=0.05)
+                    continue
+
+                # Apply any pending seek before reading the next frame
+                if seek_target >= 0:
+                    _cap.set(_cv2.CAP_PROP_POS_MSEC, seek_target)
+                    with self._video_state_lock:
+                        self._video_seek_target_ms = -1.0
+                        self._video_pos_ms = seek_target
+
+                try:
+                    ret, frame = _cap.read()
+                except Exception:
+                    # cap was force-released by stop() while read() was blocking
+                    break
+                if not ret:
+                    if cfg.video_loop:
+                        loop_count += 1
+                        _cap.set(_cv2.CAP_PROP_POS_FRAMES, 0)
+                        with self._video_state_lock:
+                            self._video_pos_ms = 0.0
+                        try:
+                            ret, frame = _cap.read()
+                        except Exception:
+                            break
+                        if not ret:
+                            _cap.release()
+                            if self._stop_event.wait(timeout=1.0):
+                                break
+                            _cap = _cv2.VideoCapture(video_path)
+                            with self._cap_lock:
+                                self._active_cap = _cap
+                            continue
+
+                        if loop_count <= 3 or loop_count % 10 == 0:
+                            self._append_log(LogEntry.from_error(
+                                f"Video reached end, looping to start (x{loop_count})."
+                            ))
+                    else:
+                        self._append_log(LogEntry.from_error("Video ended. Stopping service."))
+                        self._stop_event.set()
+                        break
+                else:
+                    # Update current position so the UI slider can track progress
+                    pos_ms = _cap.get(_cv2.CAP_PROP_POS_MSEC)
+                    with self._video_state_lock:
+                        self._video_pos_ms = pos_ms
+
+                with latest_lock:
+                    latest["frame"] = frame
+                    latest["ok"] = True
+
+                # When paused we just delivered a single step frame — go back to idle.
+                # When playing, pace the reader to match the processing interval / speed.
+                if not paused:
+                    interval = cfg.rtsp_interval / max(0.1, speed)
+                    self._stop_event.wait(timeout=interval)
+
+            _cap.release()
+            with self._cap_lock:
+                self._active_cap = None
+
+        def _loop():
+            """Processes the latest available frame at the configured interval."""
+            import torch
+            _frame_count_local = 0
+
+            while not self._stop_event.is_set():
+                self._stop_event.wait(timeout=cfg.rtsp_interval)
+
+                with latest_lock:
+                    ok = latest["ok"]
+                    frame = latest["frame"]
+
+                if not ok or frame is None:
+                    continue
+
+                m = self._model_holder.get("model")
+                if m is None:
+                    break
+
+                try:
+                    with torch.no_grad():
+                        results = m(frame, conf=cfg.conf_threshold, verbose=False)
+                    self._dataset_frame_count += 1
+                    self._process_rtsp_frame(
+                        results, frame, output_url, cfg.name,
+                        cfg.strict_output,
+                        cfg.state_changes_only,
+                        cfg.dataset_capture, cfg.dataset_interval,
+                        cfg.dataset_dir, self._dataset_frame_count,
+                    )
+                    if self._record_enabled:
+                        self._record_input_frame(
+                            service_name=cfg.name,
+                            frame=frame,
+                            record_dir=self._record_dir_cfg,
+                        )
+                    if self._preview_enabled and results:
+                        try:
+                            self._preview_queue.put_nowait(results[0].plot())
+                        except queue.Full:
+                            pass
+                except Exception as e:
+                    self._append_log(LogEntry.from_error(str(e)))
+                finally:
+                    try:
+                        del results
+                    except NameError:
+                        pass
+                    _frame_count_local += 1
+                    if _frame_count_local % 500 == 0 and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+        self._reader_thread = threading.Thread(target=_reader, daemon=True, name=f"VideoReader-{cfg.name}")
+        self._reader_thread.start()
+
+        self._thread = threading.Thread(target=_loop, daemon=True, name=f"VideoThread-{cfg.name}")
+        self._thread.start()
+        return ""
+
+    def _resolve_record_dir(self, configured_dir: str) -> str:
+        if configured_dir.strip():
+            return configured_dir.strip()
+        return os.path.expanduser("~/VisionQ_recordings")
+
+    def _open_video_writer_if_needed(
+        self,
+        service_name: str,
+        frame_shape: tuple[int, int, int],
+        record_dir: str,
+    ) -> None:
+        with self._video_lock:
+            if self._video_writer is not None:
+                return
+
+            import cv2
+
+            h, w = frame_shape[:2]
+            interval = self._config.rtsp_interval if self._config else 0.25
+            fps = max(1.0, round(1.0 / interval, 3))
+            out_dir = os.path.join(self._resolve_record_dir(record_dir), service_name)
+            os.makedirs(out_dir, exist_ok=True)
+
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_path = os.path.join(out_dir, f"{service_name}_{ts}.mp4")
+
+            # mp4v is broadly available on Windows OpenCV builds.
+            writer = cv2.VideoWriter(
+                out_path,
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                fps,
+                (w, h),
+            )
+
+            if not writer.isOpened():
+                writer.release()
+                raise RuntimeError(f"Failed to open video writer: {out_path}")
+
+            self._video_writer = writer
+            self._recording_path = out_path
+            self._append_log(
+                LogEntry.from_error(f"Recording started: {out_path}")
+            )
+
+    def _close_video_writer(self) -> None:
+        with self._video_lock:
+            if self._video_writer is None:
+                return
+            try:
+                self._video_writer.release()
+            except Exception:
+                pass
+            finally:
+                if self._recording_path:
+                    self._append_log(
+                        LogEntry.from_error(f"Recording saved: {self._recording_path}")
+                    )
+                self._video_writer = None
+                self._recording_path = ""
+
+    def _record_input_frame(
+        self,
+        service_name: str,
+        frame,
+        record_dir: str,
+    ) -> None:
+        # Intentionally save raw (unannotated) input frames for reproducible model demos.
+        raw_frame = frame.copy()
+        self._open_video_writer_if_needed(
+            service_name=service_name,
+            frame_shape=raw_frame.shape,
+            record_dir=record_dir,
+        )
+        with self._video_lock:
+            if self._video_writer is not None:
+                self._video_writer.write(raw_frame)
+
+    def can_record(self) -> bool:
+        cfg = self._config
+        if cfg is None:
+            return False
+        mode = (cfg.input_mode or ("rtsp" if cfg.rtsp_enabled else "http")).lower()
+        return mode in ("rtsp", "video")
+
+    @property
+    def is_recording(self) -> bool:
+        return self._record_enabled
+
+    def start_recording(self, record_dir: Optional[str] = None) -> str:
+        if self._state != STATE_RUNNING:
+            return "Service must be running before recording can start."
+        if not self.can_record():
+            return "Recording is available only for RTSP/video input services."
+        if self._record_enabled:
+            return ""
+
+        if record_dir is not None:
+            self._record_dir_cfg = record_dir
+
+        self._record_enabled = True
+        self._append_log(LogEntry.from_error("Recording enabled (raw stream)."))
+        return ""
+
+    def stop_recording(self):
+        if not self._record_enabled and self._video_writer is None:
+            return
+        self._record_enabled = False
+        self._close_video_writer()
+
+    @property
+    def is_previewing(self) -> bool:
+        return self._preview_enabled
+
+    def start_preview(self) -> str:
+        if self._state != STATE_RUNNING:
+            return "Service must be running before preview can start."
+        if not self.can_record():  # same modes: rtsp / video
+            return "Preview is available only for RTSP/video input services."
+        # Drain stale frames before enabling
+        while not self._preview_queue.empty():
+            try:
+                self._preview_queue.get_nowait()
+            except queue.Empty:
+                break
+        self._preview_enabled = True
+        return ""
+
+    def stop_preview(self):
+        self._preview_enabled = False
+        # Drain the queue so the Qt poll timer stops seeing frames immediately
+        while not self._preview_queue.empty():
+            try:
+                self._preview_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def get_preview_frame(self):
+        """Return the latest annotated frame (numpy BGR) or None. Called from Qt main thread."""
+        try:
+            return self._preview_queue.get_nowait()
+        except queue.Empty:
+            return None
+
+    # ── Video playback controls ────────────────────────────────────────────────
+
+    def set_video_speed(self, speed: float):
+        """Set playback speed multiplier (0.5, 1.0, 2.0, 4.0). Thread-safe."""
+        with self._video_state_lock:
+            self._video_speed = max(0.1, float(speed))
+
+    def seek_video_relative(self, delta_seconds: float):
+        """Seek by delta_seconds relative to current position. Thread-safe."""
+        with self._video_state_lock:
+            target = self._video_pos_ms + delta_seconds * 1000.0
+            target = max(0.0, target)
+            if self._video_duration_ms > 0:
+                target = min(target, self._video_duration_ms - 500.0)
+            self._video_seek_target_ms = target
+
+    def seek_video_to_ms(self, target_ms: float):
+        """Seek to an absolute position in milliseconds. Thread-safe."""
+        with self._video_state_lock:
+            target_ms = max(0.0, float(target_ms))
+            if self._video_duration_ms > 0:
+                target_ms = min(target_ms, self._video_duration_ms - 500.0)
+            self._video_seek_target_ms = target_ms
+
+    def toggle_video_pause(self) -> bool:
+        """Toggle pause/play. Returns new paused state."""
+        with self._video_state_lock:
+            self._video_paused = not self._video_paused
+            return self._video_paused
+
+    def step_video_frame(self):
+        """While paused, advance exactly one frame. Has no effect when playing."""
+        with self._video_state_lock:
+            self._video_step = True
+
+    def get_video_state(self) -> tuple:
+        """Return (pos_ms, duration_ms, speed, paused). Safe to call from Qt main thread."""
+        with self._video_state_lock:
+            return self._video_pos_ms, self._video_duration_ms, self._video_speed, self._video_paused
+
     def _process_rtsp_frame(
         self, results, frame, output_url: Optional[str], service_name: str,
-        report_only_with_direction: bool = False,
-        save_frames: bool = True,
-        frames_dir: str = _FRAMES_DIR,
-    ):
+        strict_output: bool = False,
+        state_changes_only: bool = False,
+        dataset_capture: bool = False,
+        dataset_interval: int = 10,
+        dataset_dir: str = "",
+        frame_count: int = 0,
+    ) -> dict:
         if not results:
-            return
+            return {}
 
         result = results[0]
-        box = _largest_box(result)
-        car_detected = box is not None
-        if save_frames:
-            _save_detection_frame(frame, service_name, car_detected, frames_dir)
 
-        if car_detected:
-            area = _bbox_area(box)
-            confidence = float(box.conf[0])
-            self._area_buffer.append(area)
-        else:
-            confidence = 0.0
-            self._area_buffer.clear()
+        if dataset_capture and dataset_dir and frame_count % dataset_interval == 0:
+            _save_dataset_frame(frame, service_name, dataset_dir)
 
-        direction = (
-            _determine_direction(list(self._area_buffer))
-            if len(self._area_buffer) >= 2 else "unknown"
-        )
+        # Process each class independently
+        class_results: dict[str, dict] = {}
+        for cls_name in ("car", "car_rear"):
+            state = self._class_state[cls_name]
+            buf   = state["buffer"]
+
+            box      = _largest_box(result, cls_name)
+            detected = box is not None
+
+            if detected:
+                state["misses"] = 0
+                cx, cy = _bbox_centroid(box)
+                confidence = float(box.conf[0])
+                buf.append((cx, cy, _bbox_area(box)))
+            else:
+                confidence = 0.0
+                state["misses"] += 1
+                if state["misses"] >= _MISS_TOLERANCE:
+                    buf.clear()
+
+            buf_list = list(buf)
+            if not detected:
+                current_state = "no_car"
+            elif len(buf_list) >= _MIN_DIR_FRAMES:
+                raw = _determine_direction(buf_list)
+                # car_rear direction signals are physically inverted vs car
+                current_state = _invert_direction(raw) if cls_name == "car_rear" else raw
+            else:
+                current_state = None  # still building
+
+            class_results[cls_name] = {
+                "detected":       detected,
+                "direction":      current_state if current_state is not None else "idle",
+                "confidence":     round(confidence, 4),
+                "_current_state": current_state,
+                "_misses":        state["misses"],
+            }
 
         payload = {
             "service_name": service_name,
-            "car_detected": car_detected,
-            "direction": direction,
-            "confidence": round(confidence, 4),
+            "car": {
+                "detected":   class_results["car"]["detected"],
+                "direction":  class_results["car"]["direction"],
+                "confidence": class_results["car"]["confidence"],
+            },
+            "car_rear": {
+                "detected":   class_results["car_rear"]["detected"],
+                "direction":  class_results["car_rear"]["direction"],
+                "confidence": class_results["car_rear"]["confidence"],
+            },
             "frames_analyzed": 1,
-            "frames_with_car": 1 if car_detected else 0,
         }
 
-        should_report = (
-            not report_only_with_direction
-            or (car_detected and direction != "unknown")
-        )
+        if state_changes_only:
+            should_report = False
+            for cls_name in ("car", "car_rear"):
+                cs = class_results[cls_name]["_current_state"]
+                if cs is not None and cs != self._class_state[cls_name]["last_state"]:
+                    self._class_state[cls_name]["last_state"] = cs
+                    should_report = True
+        elif strict_output:
+            car_ok  = (class_results["car"]["detected"]
+                       and class_results["car"]["_current_state"] is not None)
+            rear_ok = (class_results["car_rear"]["detected"]
+                       and class_results["car_rear"]["_current_state"] is not None)
+            car_just_gone  = (not class_results["car"]["detected"]
+                              and class_results["car"]["_misses"] == _MISS_TOLERANCE)
+            rear_just_gone = (not class_results["car_rear"]["detected"]
+                              and class_results["car_rear"]["_misses"] == _MISS_TOLERANCE)
+            should_report = car_ok or rear_ok or car_just_gone or rear_just_gone
+        else:
+            should_report = True
+
         if should_report:
             self._append_log(LogEntry.from_result(payload))
             if output_url:
@@ -585,6 +1256,8 @@ class DetectionService:
                     args=(output_url, payload),
                     daemon=True,
                 ).start()
+
+        return payload
 
     @staticmethod
     def _push_result(url: str, payload: dict):
@@ -597,14 +1270,46 @@ class DetectionService:
 
     def stop(self):
         self._stop_event.set()
+
+        # Force-release the RTSP cap immediately so the blocking _cap.read() call
+        # in the reader thread returns right away instead of waiting for a timeout.
+        with self._cap_lock:
+            if self._active_cap is not None:
+                try:
+                    self._active_cap.release()
+                except Exception:
+                    pass
+                self._active_cap = None
+
+        # Shut down HTTP server (if running in HTTP mode)
         if self._server:
             self._server.shutdown()
             self._server = None
+
+        # Wait for threads to actually finish (2s timeout each)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        if self._reader_thread and self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=2.0)
+
+        # Drop model reference then flush GPU memory so VRAM is released immediately
         self._model_holder["model"] = None
+        self._record_enabled = False
+        self._close_video_writer()
+        self.stop_preview()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
         self._state = STATE_STOPPED
         self._error_msg = ""
         self._thread = None
-        self._area_buffer.clear()
+        self._reader_thread = None
+        self._class_state = self._make_class_state()
+        self._dataset_frame_count = 0
 
 
 # ── Service registry ───────────────────────────────────────────────────────────
@@ -674,12 +1379,17 @@ class ServiceRegistry:
         if not os.path.isfile(cfg.model_path):
             return f"Model file not found:\n{cfg.model_path}"
 
+        mode = (cfg.input_mode or ("rtsp" if cfg.rtsp_enabled else "http")).lower()
+
         # Port check only for HTTP mode
-        if not cfg.rtsp_enabled and not is_port_free(cfg.input_host, cfg.input_port):
+        if mode == "http" and not is_port_free(cfg.input_host, cfg.input_port):
             return (
                 f"Port {cfg.input_port} is already in use.\n"
                 f"Choose a different port or stop the process using it."
             )
+
+        if mode == "video" and not os.path.isfile(cfg.video_path):
+            return f"Video file not found:\n{cfg.video_path}"
 
         with self._lock:
             svc = self._services.get(name)
