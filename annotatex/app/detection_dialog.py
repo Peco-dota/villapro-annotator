@@ -333,12 +333,6 @@ class ServiceConfigDialog(QDialog):
         self._conf_threshold.setValue(cfg.conf_threshold if cfg else 0.5)
         det_form.addRow("Confidence threshold:", self._conf_threshold)
 
-        self._strict_output = QCheckBox(
-            "Strict output: emit forward/idle/backward when car present, no_car when absent"
-        )
-        self._strict_output.setChecked(cfg.strict_output if cfg else False)
-        det_form.addRow("", self._strict_output)
-
         self._state_changes_only = QCheckBox(
             "State changes only: emit once per transition (forward → idle → no_car…)"
         )
@@ -591,7 +585,7 @@ class ServiceConfigDialog(QDialog):
             video_path=self._video_path.text().strip(),
             video_loop=self._video_loop.isChecked(),
             conf_threshold=self._conf_threshold.value(),
-            strict_output=self._strict_output.isChecked(),
+            strict_output=False,
             state_changes_only=self._state_changes_only.isChecked(),
             dataset_capture=self._dataset_capture.isChecked(),
             dataset_interval=self._dataset_interval.value(),

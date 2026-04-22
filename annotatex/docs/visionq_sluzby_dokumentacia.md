@@ -160,7 +160,6 @@ Každý výsledok detekcie sa odošle ako JSON správa cez HTTP POST na nakonfig
 | Pole | Popis | Kedy použiť |
 |------|-------|-------------|
 | **Confidence threshold** | Minimálna istota detekcie (0–1). Detekcie s nižšou hodnotou sú ignorované. | Odporúčaná hodnota: `0.5`. Zvýšte ak dostávate príliš veľa falošných detekcií. |
-| **Strict output** | Odosiela výsledky len keď je smer spoľahlivo určený, alebo keď auto zmizlo (`no_car`). Ignoruje fázu budovania bufferu. | Pre systémy, ktoré nepotrebujú vedieť o stave `idle`. |
 | **State changes only** | Odosiela výsledok len raz pri každej zmene stavu (`forward → idle`, `idle → no_car`...). | **Odporúčané pre väčšinu nasadení.** Minimalizuje počet správ — každá udalosť príde práve raz. |
 
 ---
