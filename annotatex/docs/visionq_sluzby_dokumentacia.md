@@ -1,162 +1,125 @@
 # VisionQ — Dokumentácia detekčných služieb
 
-> Verzia: apríl 2026  
-> Jazyk: Slovak / Slovenčina
+> Apríl 2026
 
 ---
 
 ## Obsah
 
-1. [Čo je detekčná služba?](#1-čo-je-detekčná-služba)
-2. [Čo systém detekuje?](#2-čo-systém-detekuje)
-3. [Vstupné režimy](#3-vstupné-režimy)
-4. [Konfigurácia služby — prehľad všetkých polí](#4-konfigurácia-služby--prehľad-všetkých-polí)
-5. [Výstup — JSON správa](#5-výstup--json-správa)
-6. [Spúšťač brány (Gate Trigger)](#6-spúšťač-brány-gate-trigger)
-7. [Režimy výstupu](#7-režimy-výstupu)
-8. [Receiver Dashboard (webové rozhranie)](#8-receiver-dashboard-webové-rozhranie)
-9. [Živý náhľad (Preview)](#9-živý-náhľad-preview)
-10. [Nahrávanie streamu (Input Recording)](#10-nahrávanie-streamu-input-recording)
-11. [Zber datasetov (Dataset Capture)](#11-zber-datasetov-dataset-capture)
-12. [Debug log (CSV)](#12-debug-log-csv)
-13. [Viacero služieb naraz](#13-viacero-služieb-naraz)
-14. [Príklady nasadenia](#14-príklady-nasadenia)
+1. [Čo systém detekuje](#1-čo-systém-detekuje)
+2. [Pridanie novej služby](#2-pridanie-novej-služby)
+3. [Bežiaca služba — nahrávanie, debug, náhľad](#3-bežiaca-služba--nahrávanie-debug-náhľad)
+4. [Receiver Dashboard](#4-receiver-dashboard)
 
 ---
 
-## 1. Čo je detekčná služba?
+## 1. Čo systém detekuje
 
-VisionQ dokáže bežať ako **jedna alebo viacero detekčných služieb súčasne**. Každá služba:
-
-- prijíma video vstup (kamera cez RTSP, HTTP volania, alebo lokálny video súbor),
-- spúšťa YOLO model na každom snímku,
-- určuje, čo sa nachádza v zábere a akým smerom sa objekt pohybuje,
-- výsledok posiela ako **JSON správu** na nakonfigurovanú výstupnú adresu.
-
-Každá služba má vlastné meno, vlastný model a vlastné nastavenia — môžu bežať navzájom nezávisle.
-
----
-
-## 2. Čo systém detekuje?
-
-Systém pracuje s **YOLO modelom**, ktorý rozpoznáva nasledujúce triedy objektov:
+Každá služba beží s vlastným YOLO modelom, ktorý rozpoznáva dve triedy objektov:
 
 | Trieda | Popis |
 |--------|-------|
 | `car` | Auto — čelný alebo bočný pohľad |
-| `car_rear` | Auto — pohľad zozadu (zadná časť vozidla) |
+| `car_rear` | Auto — pohľad zozadu |
 
-Pre každú detekovanú triedu systém určí:
+Pre každú triedu systém určuje **smer pohybu** na základe pohybu ťažiska bounding boxu a zmeny jeho veľkosti počas posledných snímkov:
 
-### Detekcia prítomnosti
-- **Detekované** (`detected: true`) — objekt je v zábere.
-- **Nedetekované** (`detected: false`) — objekt sa v zábere nenachádza.
-
-### Smer pohybu
-Smer je určovaný na základe pohybu ťažiska bounding boxu a zmeny jeho plochy počas posledných snímkov (typicky 8 snímkov):
-
-| Hodnota | Popis |
-|---------|-------|
+| Smer | Popis |
+|------|-------|
 | `forward` | Auto sa pohybuje smerom ku kamere / dovnútra areálu |
-| `backward` | Auto sa pohybuje od kamery / smerom von z areálu |
-| `idle` | Auto stojí alebo sa pohybuje veľmi pomaly |
-| `no_car` | Objekt nie je detekovaný |
+| `backward` | Auto sa pohybuje od kamery / smerom von |
+| `idle` | Auto stojí alebo sa pohybuje príliš pomaly |
+| `no_car` | Objekt nie je v zábere |
 
-> **Poznámka:** Systém nehlási `idle` ako prvý stav hneď po objavení auta — čaká na spoľahlivý pohybový signál, takže typický výstup vyzerá: `forward → idle → no_car`.
+Systém nereportuje `idle` ako prvý stav hneď po objavení auta — čaká na spoľahlivý pohybový signál. Typická sekvencia výsledkov vyzerá takto:
+
+```
+forward → idle → no_car
+```
 
 ---
 
-## 3. Vstupné režimy
+## 2. Pridanie novej služby
 
-Každá služba si vyberá **jeden** zo troch vstupných režimov.
+Každá služba má vlastné meno, vlastný model a vlastné nastavenia. Viacero služieb môže bežať súčasne — napríklad jedna pre vstupnú bránu, druhá pre výstupnú.
 
-### 3.1 RTSP — IP kamera
+Nová služba sa pridáva cez tlačidlo **Add Service**, ktoré otvorí konfiguračný formulár rozdelený do niekoľkých sekcií.
 
-Systém sa priamo pripojí k IP kamere cez RTSP protokol.
+---
 
-**Povinné polia:**
+### Základné nastavenia
+
+| Pole | Popis |
+|------|-------|
+| **Name** | Unikátny názov služby (napr. `brana_vstup`). Objaví sa v JSON výstupe aj v Receiver dashboarde. Názov sa po uložení nedá zmeniť — na zmenu použite Duplicate. |
+| **Model** | Cesta k `.pt` súboru s natrénovanými váhami YOLO modelu. |
+| **Auto-start** | Ak zaškrtnuté, služba sa spustí automaticky pri každom otvorení VisionQ. |
+
+---
+
+### Input Source — zdroj vstupu
+
+Každá služba si vyberá jeden z troch vstupných režimov.
+
+#### RTSP — IP kamera
+
+Systém sa priamo pripojí k IP kamere cez RTSP protokol a sám sťahuje snímky.
+
 | Pole | Príklad | Popis |
 |------|---------|-------|
 | Camera IP | `192.168.1.100` | IP adresa kamery v lokálnej sieti |
-| RTSP port | `554` | Štandardný port pre RTSP (zvyčajne nemeniť) |
+| RTSP port | `554` | Štandardný RTSP port (zvyčajne nemeniť) |
 | Username | `admin` | Prihlasovacie meno kamery |
 | Password | `heslo123` | Heslo kamery |
-| Channel path | `Streaming/Channels/102` | Cesta k streamu (závisí od výrobcu kamery) |
-| Frame interval | `0.25 s` | Ako často sa snímok spracuje (0.25 s = 4 snímky za sekundu) |
+| Channel path | `Streaming/Channels/102` | Cesta k streamu — závisí od výrobcu kamery |
+| Frame interval | `0.25 s` | Ako často sa snímok spracuje. `0.25 s` = 4 snímky za sekundu. Nižšia hodnota = väčšia záťaž procesora. |
 
-Systém zobrazí výsledné RTSP URL vo formáte:
+Systém zobrazí výsledné RTSP URL priamo v dialógu, napr.:
 ```
 rtsp://admin:heslo123@192.168.1.100:554/Streaming/Channels/102
 ```
 
 ---
 
-### 3.2 HTTP — externé volania
+#### HTTP — externé volania
 
-Systém spustí lokálny HTTP server. Externá aplikácia mu posiela obrázky cez HTTP POST požiadavku.
+Systém spustí lokálny HTTP server a čaká, kým mu externá aplikácia pošle obrázky.
 
-**Endpoint:** `POST http://<host>:<port>/detect`  
-**Formát:** `multipart/form-data`, pole `images` (3–5 obrázkov naraz odporúčané)
-
-**Polia:**
 | Pole | Príklad | Popis |
 |------|---------|-------|
-| Listen host | `0.0.0.0` | Na akej adrese počúva (0.0.0.0 = všetky rozhrania) |
-| Listen port | `5050` | Port, na ktorom čaká na požiadavky |
+| Listen host | `0.0.0.0` | Na akej adrese počúva. `0.0.0.0` znamená všetky sieťové rozhrania. |
+| Listen port | `5050` | Port, na ktorom čaká na požiadavky. Každá HTTP služba musí mať iný port. |
 
-Tento režim je vhodný, ak externý systém sám riadi zachytávanie snímkov a potrebuje len analýzu.
+Externá aplikácia posiela snímky na:
+```
+POST http://<host>:<port>/detect
+```
+Formát: `multipart/form-data`, pole `images` (odporúčané 3–5 obrázkov naraz).
 
 ---
 
-### 3.3 Video súbor — simulácia živého streamu
+#### Video súbor — simulácia živého streamu
 
-Služba číta lokálny video súbor rovnako, ako by to bol živý stream.
+Služba číta lokálny video súbor rovnako, ako by bol živý stream. Používa sa na testovanie a ladenie bez fyzickej kamery.
 
-**Polia:**
 | Pole | Príklad | Popis |
 |------|---------|-------|
-| Video file | `/video/zaznam.mp4` | Cesta k súboru (MP4, AVI, MOV, MKV) |
-| Frame interval | `0.25 s` | Interval spracovania snímkov |
+| Video file | `zaznam.mp4` | Cesta k súboru (MP4, AVI, MOV, MKV) |
+| Frame interval | `0.25 s` | Interval spracovania snímkov — rovnaký význam ako pri RTSP |
 | Loop video | ✓ / ✗ | Či sa má video opakovať po skončení |
 
-Tento režim je ideálny na **testovanie a ladenie** bez potreby fyzickej kamery.
-
 ---
 
-## 4. Konfigurácia služby — prehľad všetkých polí
+### Result Output — kam sa posielajú výsledky
 
-### Základné nastavenia
-
-| Pole | Popis |
-|------|-------|
-| **Name** | Unikátny názov služby (napr. `brana_vstup`, `brana_vychod`). Objaví sa v JSON výstupe aj v Receiver dashboarde. |
-| **Model** | Cesta k YOLO `.pt` súboru s natrénovanými váhami. |
-| **Auto-start** | Ak zaškrtnuté, služba sa spustí automaticky pri otvorení VisionQ. |
-
-### Výstup
+Každý výsledok detekcie sa odošle ako JSON správa cez HTTP POST na nakonfigurovanú adresu.
 
 | Pole | Príklad | Popis |
 |------|---------|-------|
-| Output host | `127.0.0.1` | IP adresa, na ktorú systém posiela JSON výsledky |
-| Output port | `6060` | Port prijímača (Receiver beží na tomto porte) |
+| Output host | `127.0.0.1` | IP adresa prijímača výsledkov |
+| Output port | `6060` | Port prijímača. Predvolene tu beží Receiver Dashboard. |
 
-> Výsledky sa posielajú ako `POST /result` na `http://<output_host>:<output_port>/result`.
-
-### Detekčné nastavenia
-
-| Pole | Popis |
-|------|-------|
-| **Confidence threshold** | Minimálna istota detekcie (0.0–1.0). Detekcie s nižšou hodnotou sú ignorované. Odporúčaná hodnota: `0.5`. |
-| **Strict output** | Odosiela výsledky iba keď je smer spoľahlivo určený (`forward`/`backward`) alebo keď auto zmizlo (`no_car`). Nevhodný pre systémy, ktoré potrebujú vedieť aj stav `idle`. |
-| **State changes only** | Odosiela výsledky iba pri zmene stavu (napr. `forward → idle`, `idle → no_car`). Minimalizuje počet správ — každá zmena sa reportuje práve raz. |
-
----
-
-## 5. Výstup — JSON správa
-
-Každý výsledok detekcie je odoslaný ako HTTP POST s JSON telom na nakonfigurovanú výstupnú adresu.
-
-### Štruktúra JSON
+**Štruktúra JSON výstupu:**
 
 ```json
 {
@@ -178,97 +141,122 @@ Každý výsledok detekcie je odoslaný ako HTTP POST s JSON telom na nakonfigur
 }
 ```
 
-### Popis polí
-
 | Pole | Typ | Popis |
 |------|-----|-------|
-| `service_name` | string | Meno služby, ktorá správu vygenerovala |
-| `car.detected` | bool | Či je auto (trieda `car`) viditeľné v snímku |
-| `car.direction` | string | Smer pohybu: `forward`, `backward`, `idle`, `no_car` |
-| `car.confidence` | float (0–1) | Istota detekcie (napr. `0.96` = 96 %) |
-| `car_rear.detected` | bool | Či je viditeľná zadná časť auta (trieda `car_rear`) |
+| `service_name` | string | Meno služby |
+| `car.detected` | bool | Či je auto viditeľné v snímku |
+| `car.direction` | string | `forward`, `backward`, `idle`, alebo `no_car` |
+| `car.confidence` | float 0–1 | Istota detekcie (napr. `0.96` = 96 %) |
+| `car_rear.detected` | bool | Či je viditeľná zadná časť auta |
 | `car_rear.direction` | string | Smer pohybu zadnej časti |
-| `car_rear.confidence` | float (0–1) | Istota detekcie zadnej časti |
-| `gate.open` | bool | `true` ak systém vyhodnotil, že brána má byť otvorená |
-| `frames_analyzed` | int | Počet snímkov použitých na určenie smeru |
+| `car_rear.confidence` | float 0–1 | Istota detekcie zadnej časti |
+| `gate.open` | bool | `true` keď systém vyhodnotí, že brána má byť otvorená |
+| `frames_analyzed` | int | Počet snímkov použitých na analýzu |
 
-### Typická sekvencia správ (State changes only)
+---
 
+### Detection Settings — nastavenia detekcie
+
+| Pole | Popis | Kedy použiť |
+|------|-------|-------------|
+| **Confidence threshold** | Minimálna istota detekcie (0–1). Detekcie s nižšou hodnotou sú ignorované. | Odporúčaná hodnota: `0.5`. Zvýšte ak dostávate príliš veľa falošných detekcií. |
+| **Strict output** | Odosiela výsledky len keď je smer spoľahlivo určený, alebo keď auto zmizlo (`no_car`). Ignoruje fázu budovania bufferu. | Pre systémy, ktoré nepotrebujú vedieť o stave `idle`. |
+| **State changes only** | Odosiela výsledok len raz pri každej zmene stavu (`forward → idle`, `idle → no_car`...). | **Odporúčané pre väčšinu nasadení.** Minimalizuje počet správ — každá udalosť príde práve raz. |
+
+---
+
+### Dataset Capture — zber trénovacích dát
+
+Systém môže súbežne s detekciou ukladať surové snímky pre neskorší tréning modelu.
+
+| Pole | Popis |
+|------|-------|
+| Save raw frames | Zapnutie zberu |
+| Capture every N frames | Snímok sa uloží každých N spracovaných snímkov (napr. každý 10.) |
+| Output folder | Priečinok pre uloženie — ak prázdne, použije sa predvolený adresár |
+
+Snímky sa ukladajú do podpriečinka podľa mena služby, pomenované časovou pečiatkou:
 ```
-1. { "car": {"detected": true,  "direction": "forward", ...}, "gate": {"open": false} }
-2. { "car": {"detected": true,  "direction": "idle",    ...}, "gate": {"open": true}  }
-3. { "car": {"detected": false, "direction": "no_car",  ...}, "gate": {"open": false} }
+<output_folder>/<meno_sluzby>/20260422_094512_123.jpg
 ```
 
 ---
 
-## 6. Spúšťač brány (Gate Trigger)
+### Input Recording — nahrávanie vstupu
 
-Systém dokáže automaticky signalizovať, že **brána má byť otvorená**, keď auto stojí v bezprostrednej blízkosti kamery.
+Dostupné len pre RTSP a video režim. Systém môže automaticky nahrávať vstupný stream do MP4 súboru.
 
-### Ako to funguje
+| Pole | Popis |
+|------|-------|
+| Auto-start recording | Nahrávanie sa spustí automaticky so spustením služby |
+| Output folder | Priečinok pre MP4 súbory (predvolene `~/VisionQ_recordings/`) |
 
-1. Systém sleduje **plochu bounding boxu** (ohraničujúceho obdĺžnika) detekovaného auta.
-2. Keď auto stojí (`idle`) a jeho bounding box je väčší alebo rovnaký ako nastavená **minimálna plocha**, nastaví `gate.open = true`.
-3. Toto sa reportuje **raz** pri prechode z `false` na `true`.
-4. Keď auto odíde, `gate.open` sa resetuje.
+Súbory sú pomenované:
+```
+<meno_sluzby>_<dátum_čas>.mp4
+```
 
-### Konfigurácia
+---
 
-| Pole | Príklad | Popis |
-|------|---------|-------|
-| Min bbox area | `400000` | Minimálna plocha bounding boxu v pixeloch² (0 = funkcia vypnutá) |
+### Gate Trigger — spúšťač brány
 
-### Ako zistiť správnu hodnotu prahu
+Systém dokáže automaticky signalizovať, že brána má byť otvorená, keď auto stojí priamo pred kamerou.
 
-1. Spustite službu a zapnite **Debug log** (tlačidlo `⏺ Debug` v hlavnom okne).
+**Ako to funguje:** Systém sleduje plochu bounding boxu detekovaného auta. Keď auto stojí (`idle`) a jeho bounding box je väčší alebo rovnaký ako nastavená minimálna plocha, nastaví `gate.open = true`. Táto udalosť sa reportuje práve raz — pri prechode zo zatvoreného stavu na otvorený.
+
+| Pole | Popis |
+|------|-------|
+| Min bbox area | Minimálna plocha bounding boxu v pixeloch² (0 = funkcia vypnutá) |
+
+**Ako zistiť správnu hodnotu:**
+1. Zapnite Debug log (tlačidlo `⏺ Debug`).
 2. Postavte auto pred kameru na pozíciu, kde má byť brána otvorená.
-3. V CSV súbore nájdite stĺpec `area` pre triedu `car` — táto hodnota je váš prah.
-4. Nastavte hodnotu mierne nižšie (napr. 80 % nameranej hodnoty), aby systém spoľahlivo reagoval.
+3. V CSV súbore nájdite stĺpec `area` pre triedu `car`.
+4. Nastavte hodnotu mierne nižšie ako nameraná hodnota (cca 80 %) pre spoľahlivé spúšťanie.
 
 ---
 
-## 7. Režimy výstupu
+## 3. Bežiaca služba — nahrávanie, debug, náhľad
 
-| Režim | Popis | Kedy použiť |
-|-------|-------|-------------|
-| **Kontinuálny** (predvolený) | Výsledok sa odosiela po každom spracovanom snímku | Keď externý systém potrebuje neustály tok dát |
-| **Strict output** | Odosiela len keď je smer jasný alebo auto zmizlo | Keď nechcete spracovávať `idle` správy |
-| **State changes only** | Odosiela len raz pri každej zmene stavu | **Odporúčané pre väčšinu nasadení** — minimálny šum, jednoznačné udalosti |
+Po spustení služby sú dostupné ďalšie ovládacie prvky priamo v hlavnom okne VisionQ.
+
+### Nahrávanie (Rec)
+
+Tlačidlo **⏺ Rec** spustí alebo zastaví nahrávanie vstupu do MP4 súboru za behu — bez nutnosti reštartovať službu. Funguje rovnako ako automatické nahrávanie, len sa ovláda manuálne.
 
 ---
 
-## 8. Receiver Dashboard (webové rozhranie)
+### Debug log
 
-VisionQ obsahuje vstavaný web server (Receiver), ktorý prijíma a zobrazuje výsledky zo všetkých aktívnych služieb.
+Tlačidlo **⏺ Debug** spustí zápis podrobného CSV logu každého spracovaného snímku. Súbor sa uloží do `~/VisionQ_debug/`. Kliknutím znova log zastavíte a súbor sa uzavrie.
 
-**Prístup:** `http://127.0.0.1:6060` v prehliadači
-
-### Čo vidíte v dashboarde
-
-- Každá služba má vlastný **panel** s názvom a štatistikami.
-- Štatistiky: celkový počet správ, počet detekcií auta, počet detekcií zadnej časti, posledný smer.
-- Tabuľka posledných výsledkov:
+Tento log je primárne určený na **ladenie smeru pohybu a nastavenie prahu brány**. Obsahuje pre každý snímok:
 
 | Stĺpec | Popis |
 |--------|-------|
-| TIME | Čas prijatia výsledku |
-| GATE | `▲ OPEN` ak bola brána otvorená, inak prázdne |
-| CAR | Či bolo auto detekované |
-| CAR DIR | Smer pohybu auta + istota |
-| REAR | Či bola detekovaná zadná časť |
-| REAR DIR | Smer pohybu zadnej časti + istota |
-
-- Riadky so zeleným pozadím označujú momenty, keď bola brána otvorená.
-- Dashboard sa **automaticky obnovuje** každých 0,8 sekundy.
+| `timestamp` | Čas snímku |
+| `cls` | Trieda (`car` / `car_rear`) |
+| `cx`, `cy` | Súradnice ťažiska bounding boxu |
+| `area` | Plocha bounding boxu — kľúčová hodnota pre Gate Trigger |
+| `conf` | Istota detekcie |
+| `cx_vote`, `cy_vote`, `area_vote` | Hlas každého pohybového signálu |
+| `score` | Celkové skóre smeru |
+| `final_dir` | Výsledný smer po všetkých korekcií |
+| `gate_open` | Či bola v tomto snímku brána otvorená |
 
 ---
 
-## 9. Živý náhľad (Preview)
+### Živý náhľad (Preview)
 
-Pre každú bežiacu službu je dostupný **živý náhľad** — okno zobrazujúce aktuálne spracovávané snímky vrátane vizualizácie detekcií (bounding boxy, trieda, istota).
+Tlačidlo **Preview** otvorí okno so živým obrazom z kamery alebo videa. V náhľade sú vykresľované **YOLO detekcie** — bounding boxy s triedou a istotou pre každý detekovaný objekt.
 
-### Ovládanie prehrávania (Video / RTSP režim)
+#### Sledovanie streamu (RTSP režim)
+
+V RTSP režime náhľad zobrazuje živý obraz z kamery. Nie je možné video posúvať ani pozastaviť — obraz plynie v reálnom čase.
+
+#### Ovládanie prehrávania (Video režim)
+
+Keď je zdrojom video súbor, v spodnej časti náhľadu sa zobrazí lišta s ovládacími prvkami:
 
 | Prvok | Funkcia |
 |-------|---------|
@@ -276,189 +264,64 @@ Pre každú bežiacu službu je dostupný **živý náhľad** — okno zobrazuj�
 | -15s / -5s | Skok dozadu o 15 / 5 sekúnd |
 | ▶ / ⏸ | Prehrávanie / Pauza |
 | +5s / +15s | Skok dopredu o 5 / 15 sekúnd |
+| ◀ Frame / Frame ▶ | Posun o jeden snímok (len pri pauze) — vhodné na presnú analýzu |
 | Rýchlosť (×0.5 – ×4) | Zmena rýchlosti prehrávania |
-| Posúvač (seek bar) | Kliknutím skočíte na ľubovoľné miesto vo videu |
-
-> **Tip:** Pri podržaní myši nad posúvačom sa zobrazí čas v minútach a sekundách (napr. `12:34`), čo pomáha pri navigácii v dlhých záznamoch.
-
-### Snímkový krok (Frame step)
-
-Tlačidlá `◀ Frame` a `Frame ▶` posunú video o jeden snímok dozadu / dopredu (len pri pauze). Užitočné pri podrobnej analýze.
-
-### Tlačidlo ⏺ Rec
-
-Spustí/zastaví nahrávanie aktuálneho live streamu / videa do MP4 súboru. Súbor sa uloží do nakonfigurovaného adresára (predvolene `~/VisionQ_recordings/`).
-
-### Tlačidlo ⏺ Debug
-
-Spustí/zastaví zápis podrobného CSV logu každého snímku (pozri sekciu 12).
+| Posúvač (seek bar) | Kliknutím skočíte na ľubovoľné miesto. Pri podržaní myši sa zobrazí čas v minútach (napr. `12:34`). |
+| Čítač | Zobrazuje aktuálnu pozíciu a celkovú dĺžku videa vo formáte `MM:SS / MM:SS` |
 
 ---
 
-## 10. Nahrávanie streamu (Input Recording)
+## 4. Receiver Dashboard
 
-Každá RTSP alebo video služba môže **automaticky nahrávať** vstupný stream do lokálneho MP4 súboru.
+VisionQ obsahuje vstavaný webový server, ktorý prijíma výsledky zo všetkých aktívnych služieb a zobrazuje ich v prehľadnom dashboarde.
 
-| Pole | Popis |
-|------|-------|
-| Auto-start recording | Nahrávanie sa spustí automaticky so spustením služby |
-| Output folder | Priečinok, kam sa ukladajú súbory (predvolene `~/VisionQ_recordings/`) |
+**Prístup:** `http://127.0.0.1:6060` v prehliadači
 
-Súbory sú pomenované podľa vzoru:
-```
-<meno_sluzby>_<dátum_čas>.mp4
-```
-Príklad: `brana_vstup_20260422_094512.mp4`
-
-FPS nahrávky sa určuje automaticky z nastaveného intervalu snímkov.
+Dashboard sa automaticky obnovuje každých 0,8 sekundy a nevyžaduje žiadne manuálne obnovenie stránky.
 
 ---
 
-## 11. Zber datasetov (Dataset Capture)
+### Rozloženie
 
-Systém môže súbežne s detekciou **ukladať surové snímky** (bez anotácií) pre neskoršie použitie na tréning modelu.
+Každá aktívna služba má vlastný panel. Panely sa vytvárajú automaticky pri prvom prijatí výsledku od danej služby.
 
-| Pole | Popis |
-|------|-------|
-| Save raw frames | Zapnutie zberu datasetov |
-| Capture every N frames | Snímok sa uloží každých N spracovaných snímkov (napr. každý 10.) |
-| Output folder | Priečinok pre uloženie snímkov |
+**Hlavička panelu** zobrazuje:
+- Názov služby
+- Stav (`Live · HH:MM:SS` — čas posledného výsledku)
 
-Štruktúra priečinkov:
-```
-<output_folder>/
-  <meno_sluzby>/
-    20260422_094512_123.jpg
-    20260422_094522_456.jpg
-    ...
-```
+**Štatistiky panelu:**
 
-Každý súbor je pomenovaný časovou pečiatkou — snímky sú chronologicky zoradené a kolízie sú vylúčené.
+| Štatistika | Popis |
+|------------|-------|
+| Reports | Celkový počet prijatých správ od tejto služby |
+| Car | Počet správ, kde bolo detekované auto (`car`) |
+| Car rear | Počet správ, kde bola detekovaná zadná časť auta |
+| Last dir | Posledný zaznamenaný smer |
 
 ---
 
-## 12. Debug log (CSV)
+### Tabuľka výsledkov
 
-Pre ladenie detekcie smeru a nastavovania prahu brány je k dispozícii **detailný CSV log** každého snímku.
-
-### Ako zapnúť
-
-V hlavnom okne VisionQ kliknite na **`⏺ Debug`** vedľa príslušnej služby. Zobrazí sa cesta k súboru CSV. Kliknutím znova log vypnete a súbor sa uzavrie.
-
-Súbory sa ukladajú do `~/VisionQ_debug/` s názvom:
-```
-direction_<meno_sluzby>_<dátum_čas>.csv
-```
-
-### Stĺpce CSV
+Každý prijatý výsledok sa zobrazí ako riadok v tabuľke (najnovší hore):
 
 | Stĺpec | Popis |
 |--------|-------|
-| `timestamp` | Čas snímku (HH:MM:SS.mmm) |
-| `service` | Meno služby |
-| `cls` | Trieda objektu (`car` alebo `car_rear`) |
-| `detected` | Či bol objekt detekovaný |
-| `cx`, `cy` | Súradnice ťažiska bounding boxu (pixely) |
-| `area` | Plocha bounding boxu (pixely²) |
-| `conf` | Istota detekcie (0–1) |
-| `buf_len` | Počet snímkov v aktuálnom pohybovom bufferi |
-| `cx_rel`, `cy_rel`, `area_rel` | Relatívna rýchlosť zmeny signálov (% per snímok) |
-| `cx_vote`, `cy_vote`, `area_vote` | Hlas každého signálu (1 = dopredu, -1 = dozadu, 0 = neutrálny) |
-| `score` | Celkové skóre (súčet hlasov) |
-| `raw_dir` | Smer pred aplikovaním hysterézy |
-| `final_dir` | Výsledný smer po hysteréze |
-| `gate_threshold` | Nakonfigurovaný prah brány |
-| `gate_open` | Či je v tomto snímku brána otvorená |
+| TIME | Čas prijatia výsledku |
+| GATE | `▲ OPEN` ak bola pri tomto výsledku brána otvorená, inak prázdne |
+| CAR | Prítomnosť auta (`● CAR` alebo `○ —`) |
+| CAR DIR | Smer pohybu auta a istota detekcie (napr. `forward 96%`) |
+| REAR | Prítomnosť zadnej časti (`● REAR` alebo `○ —`) |
+| REAR DIR | Smer pohybu zadnej časti |
+
+Riadky, kde bola brána otvorená (`gate.open = true`), sú zvýraznené zeleným pozadím.
 
 ---
 
-## 13. Viacero služieb naraz
+### Farebné kódovanie smerov
 
-VisionQ umožňuje bežať **neobmedzený počet služieb súčasne** — každá so svojou kamerou, modelom a nastaveniami.
-
-Príklady použitia:
-- `brana_vstup` — kamera sledujúca príjazd (čelný pohľad)
-- `brana_vychod` — kamera sledujúca odchod (čelný pohľad)
-- `dvor` — kamera na dvore (sledovanie pohybu)
-
-Každá služba:
-- má vlastný port (ak ide o HTTP režim),
-- odosiela výsledky na rovnakú alebo rôznu výstupnú adresu,
-- objavuje sa ako samostatný panel v Receiver dashboarde,
-- sa dá spustiť, zastaviť, editovať alebo duplikovať nezávisle.
-
----
-
-## 14. Príklady nasadenia
-
-### Príklad 1: Jedna vstupná brána, RTSP kamera, integrácia s externým systémom
-
-```
-[IP Kamera] 
-    ↓ RTSP stream
-[VisionQ — služba "brana_vstup"]
-    ↓ HTTP POST JSON
-[Externá aplikácia na porte 6060]
-```
-
-**Konfigurácia:**
-- Vstup: RTSP, IP kamery, interval 0.25 s
-- State changes only: ✓ (každá udalosť príde práve raz)
-- Gate Trigger: nastavený prah podľa reálnej plochy auta pred bránou
-- Výstup: `127.0.0.1:6060` (alebo IP externého servera)
-
-**Typický tok správ:**
-```json
-{"service_name": "brana_vstup", "car": {"detected": true, "direction": "forward", "confidence": 0.96}, "gate": {"open": false}}
-{"service_name": "brana_vstup", "car": {"detected": true, "direction": "idle",    "confidence": 0.98}, "gate": {"open": true}}
-{"service_name": "brana_vstup", "car": {"detected": false,"direction": "no_car",  "confidence": 0.0},  "gate": {"open": false}}
-```
-
----
-
-### Príklad 2: Testovanie na video súbore
-
-- Vstup: Video súbor (lokálny MP4 záznam)
-- Loop: ✓
-- Debug log: ✓ (zapnúť pred testom, vypnúť po)
-- State changes only: ✓
-
-Postup:
-1. Pridajte novú službu, zvoľte "Use local video file".
-2. Vyberte video súbor.
-3. Spustite službu — v náhľade uvidíte spracovávané snímky.
-4. Zapnite Debug log a sledujte CSV v reálnom čase.
-5. Otvorte Receiver dashboard (`http://127.0.0.1:6060`) pre prehľad výsledkov.
-
----
-
-### Príklad 3: Integrácia s externou aplikáciou
-
-Externá aplikácia počúva na `POST /result` (alebo ľubovoľnom vlastnom endpointe).
-
-**Minimálny Python prijímač:**
-```python
-from flask import Flask, request
-app = Flask(__name__)
-
-@app.route("/result", methods=["POST"])
-def receive():
-    data = request.get_json()
-    service = data.get("service_name")
-    gate    = data.get("gate", {}).get("open", False)
-    car_dir = data.get("car", {}).get("direction", "no_car")
-    
-    print(f"[{service}] smer={car_dir}, brana={'OPEN' if gate else 'closed'}")
-    
-    if gate:
-        # tu spustite otváranie brány
-        pass
-    
-    return {"ok": True}
-
-app.run(host="0.0.0.0", port=6060)
-```
-
----
-
-*Dokument vygenerovaný pre internú potrebu projektu VillaPro / VisionQ.*
+| Farba | Smer |
+|-------|------|
+| Zelená | `forward` — auto prichádza |
+| Oranžová | `backward` — auto odchádza |
+| Žltá | `idle` — auto stojí |
+| Sivá | Nie je detekované |
