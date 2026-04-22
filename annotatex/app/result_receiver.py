@@ -103,6 +103,9 @@ _HTML = """<!DOCTYPE html>
   .idle-cl { color: #facc15; }
   .unk     { color: #475569; }
 
+  /* ── Gate-open row highlight ── */
+  tr.gate-open td { background: #14532d44 !important; }
+
   /* ── Empty / no-services placeholder ── */
   #empty {
     color: #334155; font-size: 13px; text-align: center;
@@ -168,6 +171,7 @@ function createPanel(name) {
       <span class="panel-name">${escHtml(name)}</span>
       <span class="panel-status"><span class="dot"></span><span class="ps-text">waiting…</span></span>
     </div>
+
     <div class="panel-stats">
       <div class="stat"><div class="stat-val" id="${id}-total">0</div><div class="stat-lbl">Reports</div></div>
       <div class="stat"><div class="stat-val" id="${id}-cars">0</div><div class="stat-lbl">Car</div></div>
@@ -177,7 +181,7 @@ function createPanel(name) {
     <div class="panel-table-wrap">
       <table>
         <thead><tr>
-          <th>TIME</th><th>CAR</th><th>CAR DIR</th><th>REAR</th><th>REAR DIR</th><th>FRAMES</th>
+          <th>TIME</th><th>GATE</th><th>CAR</th><th>CAR DIR</th><th>REAR</th><th>REAR DIR</th>
         </tr></thead>
         <tbody id="${id}-tbody"></tbody>
       </table>
@@ -205,7 +209,7 @@ function renderPanel(name, rows) {
     setText(id + '-dir', carDir === rearDir ? carDir : carDir + ' / ' + rearDir);
   }
 
-  // Status dot — "live" if last result arrived recently
+  // Status dot
   const dot = panel.querySelector('.panel-status .dot');
   const psText = panel.querySelector('.ps-text');
   if (rows.length > 0) {
@@ -219,16 +223,20 @@ function renderPanel(name, rows) {
   tbody.innerHTML = rows.map(r => {
     const car  = r.car      || {};
     const rear = r.car_rear || {};
+    const gate = r.gate     || {};
     const carConf  = car.detected  && car.confidence  ? ' ' + (car.confidence  * 100).toFixed(0) + '%' : '';
     const rearConf = rear.detected && rear.confidence ? ' ' + (rear.confidence * 100).toFixed(0) + '%' : '';
+    const gateCell = gate.open
+      ? '<span style="color:#4ade80;font-weight:bold">▲ OPEN</span>'
+      : '<span style="color:#334155">—</span>';
     return `
-    <tr>
+    <tr class="${gate.open ? 'gate-open' : ''}">
       <td style="color:#475569">${r.timestamp || '—'}</td>
+      <td>${gateCell}</td>
       <td class="${car.detected  ? 'car' : 'nocar'}">${car.detected  ? '● CAR'  : '○ —'}</td>
       <td class="${dirClass(car.direction)}">${car.detected   ? (car.direction  || '—') + carConf  : '—'}</td>
       <td class="${rear.detected ? 'car' : 'nocar'}">${rear.detected ? '● REAR' : '○ —'}</td>
       <td class="${dirClass(rear.direction)}">${rear.detected ? (rear.direction || '—') + rearConf : '—'}</td>
-      <td style="color:#64748b">${r.frames_analyzed ?? '—'}</td>
     </tr>
   `;
   }).join('');

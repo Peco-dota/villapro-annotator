@@ -7,9 +7,9 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QSpinBox, QDoubleSpinBox, QFileDialog, QFormLayout, QWidget,
     QScrollArea, QFrame, QMessageBox, QSizePolicy, QCheckBox,
-    QTextEdit, QMenu, QGroupBox, QSlider,
+    QTextEdit, QMenu, QGroupBox, QSlider, QToolTip,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint
 from PyQt6.QtGui import QFont, QAction, QImage, QPixmap
 
 from app.detection_service import (
@@ -25,6 +25,7 @@ _BASE = """
         background-color: #1a1a2e;
         color: #e2e8f0;
     }
+    QToolTip { color: #ffffff; background-color: #1e293b; border: 1px solid #475569; }
     QLabel { color: #94a3b8; font-size: 12px; }
     QLineEdit, QSpinBox, QDoubleSpinBox {
         background-color: #0f172a;
@@ -409,6 +410,33 @@ class ServiceConfigDialog(QDialog):
         self._on_record_toggled(self._record_stream.isChecked())
         layout.addWidget(rec_group)
 
+        # ── Gate trigger group ───────────────────────────────────────────────
+        gate_group = QGroupBox("Gate Trigger")
+        gate_group.setStyleSheet(_BASE)
+        gate_form = QFormLayout(gate_group)
+        gate_form.setSpacing(8)
+        gate_form.setContentsMargins(10, 14, 10, 10)
+        gate_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        gate_hint = QLabel(
+            "Emit gate_open=true when an incoming car (class 'car') is idle and its "
+            "bounding box area ≥ this value (pixels²). Set to 0 to disable.\n"
+            "Tip: use the Debug log to read the 'area' column while the car sits in front of the gate."
+        )
+        gate_hint.setStyleSheet("color: #475569; font-size: 10px;")
+        gate_hint.setWordWrap(True)
+        gate_form.addRow("", gate_hint)
+
+        self._gate_area_threshold = QDoubleSpinBox()
+        self._gate_area_threshold.setRange(0, 99_000_000)
+        self._gate_area_threshold.setDecimals(0)
+        self._gate_area_threshold.setSingleStep(10000)
+        self._gate_area_threshold.setValue(cfg.gate_area_threshold if cfg else 0.0)
+        self._gate_area_threshold.setSpecialValueText("Disabled (0)")
+        gate_form.addRow("Min bbox area:", self._gate_area_threshold)
+
+        layout.addWidget(gate_group)
+
         # Auto-start (last item in scroll content)
         self._auto_start = QCheckBox("Auto-start this service when VisionQ opens")
         self._auto_start.setChecked(cfg.auto_start if cfg else False)
@@ -570,12 +598,36 @@ class ServiceConfigDialog(QDialog):
             dataset_dir=self._dataset_dir.text().strip(),
             record_stream=self._record_stream.isChecked() and mode in ("rtsp", "video"),
             record_dir=self._record_dir.text().strip(),
+            gate_area_threshold=self._gate_area_threshold.value(),
         )
         self.accept()
 
     @property
     def result_config(self) -> ServiceConfig | None:
         return self._result_cfg
+
+
+# ── Seek slider with hover-time tooltip ───────────────────────────────────────
+
+class _SeekSlider(QSlider):
+    """Horizontal seek slider that shows a timestamp tooltip on hover."""
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self._duration_ms: float = 0.0
+        self.setMouseTracking(True)
+
+    def set_duration(self, ms: float):
+        self._duration_ms = ms
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        if self._duration_ms > 0:
+            frac = event.position().x() / max(self.width(), 1)
+            frac = max(0.0, min(1.0, frac))
+            total_s = int(frac * self._duration_ms / 1000)
+            label = f"{total_s // 60}:{total_s % 60:02d}"
+            QToolTip.showText(event.globalPosition().toPoint(), label, self)
 
 
 # ── Live preview dialog ────────────────────────────────────────────────────────
@@ -630,7 +682,7 @@ class PreviewDialog(QDialog):
         prog_row = QHBoxLayout()
         prog_row.setSpacing(8)
 
-        self._slider = QSlider(Qt.Orientation.Horizontal)
+        self._slider = _SeekSlider()
         self._slider.setRange(0, 10000)
         self._slider.setValue(0)
         self._slider.setStyleSheet("""
@@ -792,6 +844,7 @@ class PreviewDialog(QDialog):
     def update_video_state(self, pos_ms: float, duration_ms: float, speed: float, paused: bool = False):
         """Called from the poll timer (Qt main thread) to update the controls bar."""
         self._duration_ms = duration_ms
+        self._slider.set_duration(duration_ms)
         if not self._slider_dragging and duration_ms > 0:
             self._slider.setValue(int(pos_ms / duration_ms * 10000))
         self._time_lbl.setText(f"{self._fmt_ms(pos_ms)} / {self._fmt_ms(duration_ms)}")

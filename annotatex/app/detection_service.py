@@ -46,6 +46,7 @@ _DBG_COLUMNS = [
     "cx_rel", "cy_rel", "area_rel",
     "cx_vote", "cy_vote", "area_vote", "score",
     "raw_dir", "final_dir",
+    "gate_threshold", "gate_open",
 ]
 
 
@@ -154,6 +155,9 @@ class ServiceConfig:
     # Input recording: save raw stream/video frames to a local video file
     record_stream: bool = False
     record_dir: str = ""
+    # Gate open trigger: emit gate_open=True when car is idle with bbox area >= this value.
+    # Set to 0 to disable.  Typical value: measure the area when the car fills the frame.
+    gate_area_threshold: float = 0.0
 
     @property
     def rtsp_url(self) -> str:
@@ -198,6 +202,7 @@ class ServiceConfig:
             dataset_dir=d.get("dataset_dir", ""),
             record_stream=d.get("record_stream", False),
             record_dir=d.get("record_dir", ""),
+            gate_area_threshold=float(d.get("gate_area_threshold", 0.0)),
         )
 
 
@@ -603,6 +608,7 @@ class DetectionService:
         self._stop_event = threading.Event()
         # Per-class tracking state for direction (RTSP/video mode)
         self._class_state: dict[str, dict] = self._make_class_state()
+        self._gate_last_open: bool = False
         # Live preview — processing thread puts annotated frames here;
         # the Qt main thread polls and renders them (maxsize=1 keeps only latest)
         self._preview_enabled: bool = False
@@ -676,6 +682,7 @@ class DetectionService:
         self._error_msg = ""
         self._config = cfg
         self._class_state = self._make_class_state()
+        self._gate_last_open = False
         self._dataset_frame_count = 0
         mode = (cfg.input_mode or ("rtsp" if cfg.rtsp_enabled else "http")).lower()
         self._record_enabled = bool(cfg.record_stream and mode in ("rtsp", "video"))
@@ -855,6 +862,7 @@ class DetectionService:
                         cfg.state_changes_only,
                         cfg.dataset_capture, cfg.dataset_interval,
                         cfg.dataset_dir, self._dataset_frame_count,
+                        cfg.gate_area_threshold,
                     )
                     if self._record_enabled:
                         self._record_input_frame(
@@ -1051,6 +1059,7 @@ class DetectionService:
                         cfg.state_changes_only,
                         cfg.dataset_capture, cfg.dataset_interval,
                         cfg.dataset_dir, self._dataset_frame_count,
+                        cfg.gate_area_threshold,
                     )
                     if self._record_enabled:
                         self._record_input_frame(
@@ -1289,6 +1298,7 @@ class DetectionService:
         dataset_interval: int = 10,
         dataset_dir: str = "",
         frame_count: int = 0,
+        gate_area_threshold: float = 0.0,
     ) -> dict:
         if not results:
             return {}
@@ -1329,6 +1339,8 @@ class DetectionService:
                     "buf_len": 0, "cx_rel": "", "cy_rel": "", "area_rel": "",
                     "cx_vote": "", "cy_vote": "", "area_vote": "", "score": "",
                     "raw_dir": "no_car", "final_dir": "no_car",
+                    "gate_threshold": gate_area_threshold if cls_name == "car" else "",
+                    "gate_open": False if cls_name == "car" else "",
                 })
             elif len(buf_list) >= _MIN_DIR_FRAMES:
                 dbg: dict = {}
@@ -1355,6 +1367,12 @@ class DetectionService:
 
                 current_state = resolved
                 last_entry = buf_list[-1]
+                _gate_now = bool(
+                    cls_name == "car"
+                    and gate_area_threshold > 0
+                    and resolved == "idle"
+                    and last_entry[2] >= gate_area_threshold
+                )
                 _dbg_write({
                     "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
                     "service": service_name, "cls": cls_name,
@@ -1366,6 +1384,8 @@ class DetectionService:
                     "buf_len": len(buf_list),
                     **dbg,
                     "final_dir": resolved,
+                    "gate_threshold": gate_area_threshold if cls_name == "car" else "",
+                    "gate_open": _gate_now if cls_name == "car" else "",
                 })
             else:
                 current_state = None  # still building
@@ -1382,6 +1402,8 @@ class DetectionService:
                     "cx_rel": "", "cy_rel": "", "area_rel": "",
                     "cx_vote": "", "cy_vote": "", "area_vote": "", "score": "",
                     "raw_dir": "building", "final_dir": "building",
+                    "gate_threshold": gate_area_threshold if cls_name == "car" else "",
+                    "gate_open": False if cls_name == "car" else "",
                 })
 
             class_results[cls_name] = {
@@ -1390,20 +1412,36 @@ class DetectionService:
                 "confidence":     round(confidence, 4),
                 "_current_state": current_state,
                 "_misses":        state["misses"],
+                "_area":          _bbox_area(box) if detected else 0.0,
             }
+
+        # ── Gate open detection ───────────────────────────────────────────────
+        # Gate opens for incoming cars only (class "car", not "car_rear").
+        # Conditions: car detected, direction confirmed as idle (not still building),
+        # and the bounding box area exceeds the configured threshold (= car is close).
+        car_res = class_results["car"]
+        # Gate logic — simple: open when car is idle at the gate (area >= threshold).
+        gate_open = bool(
+            gate_area_threshold > 0
+            and car_res["detected"]
+            and car_res["_current_state"] is not None
+            and car_res["direction"] == "idle"
+            and car_res["_area"] >= gate_area_threshold
+        )
 
         payload = {
             "service_name": service_name,
             "car": {
-                "detected":   class_results["car"]["detected"],
-                "direction":  class_results["car"]["direction"],
-                "confidence": class_results["car"]["confidence"],
+                "detected":   car_res["detected"],
+                "direction":  car_res["direction"],
+                "confidence": car_res["confidence"],
             },
             "car_rear": {
                 "detected":   class_results["car_rear"]["detected"],
                 "direction":  class_results["car_rear"]["direction"],
                 "confidence": class_results["car_rear"]["confidence"],
             },
+            "gate": {"open": gate_open},
             "frames_analyzed": 1,
         }
 
@@ -1421,6 +1459,12 @@ class DetectionService:
                     continue
                 self._class_state[cls_name]["last_state"] = cs
                 should_report = True
+            # Gate: report only on the closed→open transition, then reset when car leaves.
+            if gate_open and not self._gate_last_open:
+                self._gate_last_open = True
+                should_report = True
+            elif not gate_open:
+                self._gate_last_open = False
         elif strict_output:
             car_ok  = (class_results["car"]["detected"]
                        and class_results["car"]["_current_state"] is not None)
@@ -1495,6 +1539,7 @@ class DetectionService:
         self._thread = None
         self._reader_thread = None
         self._class_state = self._make_class_state()
+        self._gate_last_open = False
         self._dataset_frame_count = 0
 
 
