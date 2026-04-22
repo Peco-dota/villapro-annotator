@@ -1,115 +1,28 @@
-# AnnotateX
+# aplikacia
+## spustenie a konfiguracia
 
-Professional YOLO dataset annotation desktop application built with PyQt6.
+- Aplikacia sa spusta v terminali - nevytvara ziadne UI prvky ani grafiku (headless), bezi kym nedostane sig-term (CTRL+C)
+- Bude mat konfiguracny subor - napriklad json. konfiguracny subor sa bude specifikovat cez argument -c alebo --config s cestou k suboru (default moze byt napriklad `~/.config/nejaky_nazov.json`)
+- V konfiguracnom subore bude minimalne IP a port na ktorom bude pocuvat HTTP server. moznost pridat certifikaty pre HTTPS by bolo plus ale nieje podmienka, ale vacsina HTTPS serverov to uz podporuju, len im dat tie certifikaty.
+- Dalsie nastavenia aplikacie mozu byt v tom subore - teda aplikacia si moze ukladat nastavenia do toho suboru.
+- V pripade ak by bolo potrebne viac nastaveni a konfiguracny subor by nestacil a je potrebne vyuzit databazu - v tom pripade odporucam pouzivat postgresql (v nasej firme je to standard)
+- Nastavovanie aplikacie by malo ist cez HTTP API endpointy (treba riesit aj nejaku autentifikaciu, napriklad API tokeny alebo aj uzivatelia)
+- Konfiguracna webova aplikacia - predpokladam jednoducha staticka stranka s logikou v javascripte
 
-## Setup
+## konektor do nasich aplikacii
 
-```bash
-# 1. Create and activate virtual environment (already done)
-python3 -m venv .venv
-source .venv/bin/activate  # macOS/Linux
-# .venv\Scripts\activate   # Windows
+1. HTTP API - idealne SSE (Server Sent Event) aby sme nemuseli robit polling (samozrejme podmieneny API tokenom) - toto by vyuzila by najma webova aplikacia ktoru pouzivate
+2. Kazdy stream (kedze podporuje viacero kamier) by mal mat moznost zapnut TCP/SSL (TLS/mTLS) server - tam sa nakonfiguruje port
+  - na nejakom porte - nasa aplikacia sa pripoji na ten TCP stream
+  - nasa aplikacia spravidla nemusi posielat nic (nenapada ma co by mohla posielat, nechame otvorene do buducna)
+  - vasa aplikacia len posielala json informacie vzdy ked sa nieco zmeni (mala by poslat z casu nacas aj informaciu ze sa nic nedeje - ako keepalive)
+  - staci posielat json v jednom riadku a ako oddelovac pouzivat novy riadok '\n' - jedna sprava - jeden riadok
+  - na ten TCP/SSL port sa moze pripojit N klientov a v tedy kazdemu klientovi treba poslat informaciu o zmene
 
-# 2. Install dependencies
-pip install -r annotatex/requirements.txt
+## priklad aplikacie na inspiraciu - podobnu vec som riesil v tejto aplikacii
 
-# 3. Run
-cd annotatex
-python main.py
-
-# Optional: open a project directly
-python main.py /path/to/project.annotatex
-```
-
-## Features
-
-- **Project management** — create/open/save `.annotatex` project files with full state
-- **Image navigation** — thumbnail sidebar, keyboard nav, progress tracking
-- **Annotation canvas** — zoomable/pannable QGraphicsView with precise bbox drawing
-- **Classes panel** — add/remove/reorder classes with auto-assigned colors
-- **Annotations panel** — per-image box list with click-to-select
-- **YOLO export** — `images/`, `labels/`, `classes.txt`, optional `data.yaml` + train/val/test split
-- **COCO JSON export** — standard COCO format
-- **Undo/Redo** — full history stack per image
-- **Auto-save** — configurable interval
-- **Dark theme** — Roboflow-inspired dark UI
-- **RTSP demo recording** — optional per-service MP4 recording with inference overlays for customer demos
-
-## Keyboard Shortcuts
-
-| Key | Action |
-|-----|--------|
-| `A` / `←` | Previous image |
-| `D` / `→` | Next image |
-| `R` | Draw rectangle tool |
-| `V` / `S` | Select/move tool |
-| `1`–`9` | Select class by index |
-| `Delete` | Delete selected box |
-| `Escape` | Deselect |
-| `Ctrl+Z` | Undo |
-| `Ctrl+Y` / `Ctrl+Shift+Z` | Redo |
-| `Ctrl+S` | Save project |
-| `Ctrl+N` | New project |
-| `Ctrl+O` | Open project |
-| `F` | Fit image to window |
-| `0` | Zoom to 100% |
-| `+` / `-` | Zoom in / out |
-| `Ctrl+Scroll` | Zoom in/out |
-| `Middle mouse` / `Space+drag` | Pan canvas |
-
-## Project File Format
-
-Projects are saved as `.annotatex` JSON files containing:
-- Image folder path
-- Class definitions (name + color)
-- All bounding box annotations (normalized YOLO coords)
-- Current image index and settings
-
-## Export Formats
-
-### YOLO
-```
-output/
-├── train/
-│   ├── images/
-│   └── labels/
-├── val/
-│   ├── images/
-│   └── labels/
-├── test/
-│   ├── images/
-│   └── labels/
-├── classes.txt
-└── data.yaml
-```
-
-Each label file contains one line per box:
-```
-class_id cx cy width height
-```
-All values normalized 0–1.
-
-### COCO JSON
-```
-output/
-├── images/
-└── annotations.json
-```
-
-## File Structure
-
-```
-annotatex/
-├── main.py                 # Entry point + welcome screen
-├── requirements.txt
-└── app/
-    ├── annotation.py       # BoundingBox & ClassDef data structures
-    ├── project.py          # Project model, serialization, YOLO I/O
-    ├── utils.py            # Colors, YOLO/COCO export, helpers
-    ├── canvas.py           # QGraphicsView annotation canvas
-    ├── sidebar_images.py   # Left image thumbnail list
-    ├── sidebar_classes.py  # Right classes + annotations panel
-    ├── toolbar.py          # Top toolbar
-    ├── dialogs.py          # Export, settings, new project, class assign
-    └── main_window.py      # Main QMainWindow
-```
+https://github.com/cortexm/ser2tcp
+- je to velmi jednoduchy prevodnik medzi seriovymi portmi a TCP/SSL/WebSocket (vzdialeny pristup k seriovym portom pocitaca)
+- vyuzivajucej HTTP API (tu pouzivam sice vlastny HTTP server - ale mozte pouzit cokolvek co je vam lepsie)
+- kompletnu konfiguraciu cez web
+- jeden konfiguracny subor .json kde sa uklada vsetko nastavenie aj uzivatelia ci API tokeny
