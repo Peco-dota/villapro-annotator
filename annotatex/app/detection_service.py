@@ -504,7 +504,7 @@ def _make_flask_app(
                     # For car_rear, exclude the area signal to avoid the partial-reveal
                     # artefact (bbox grows as the car enters frame even though it's leaving),
                     # and require only 2 centroid signals to agree (threshold -2 instead of -3).
-                    raw = _determine_direction(hist, use_area=False, forward_threshold=2, backward_threshold=-2, signal_threshold=0.005)
+                    raw = _determine_direction(hist, use_area=False, forward_threshold=2, backward_threshold=-1, signal_threshold=0.005)
                 else:
                     raw = _determine_direction(hist)
                 current_state = _invert_direction(raw) if cls_name == "car_rear" else raw
@@ -1335,7 +1335,7 @@ class DetectionService:
                 if cls_name == "car_rear":
                     raw = _determine_direction(
                         buf_list, use_area=False, forward_threshold=2,
-                        backward_threshold=-2, signal_threshold=0.005,
+                        backward_threshold=-1, signal_threshold=0.005,
                         debug_out=dbg,
                     )
                 else:
