@@ -1,4 +1,4 @@
-# aplikacia
+# aplikacia - requirements
 ## spustenie a konfiguracia
 
 - Aplikacia sa spusta v terminali - nevytvara ziadne UI prvky ani grafiku (headless), bezi kym nedostane sig-term (CTRL+C)
