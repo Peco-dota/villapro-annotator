@@ -10,6 +10,7 @@ to the configured output URL.  Multiple named service instances can run simultan
 """
 from __future__ import annotations
 
+import csv
 import io
 import json
 import os
@@ -29,10 +30,62 @@ from PIL import Image
 
 log = logging.getLogger("detection_service")
 
+# ── Direction debug capture ────────────────────────────────────────────────────
+# Call start_direction_debug(path) to begin writing a CSV of every frame's
+# bbox signals + direction computation.  Call stop_direction_debug() to flush
+# and close.  Thread-safe.
+
+_dbg_lock   = threading.Lock()
+_dbg_file   = None
+_dbg_writer = None
+
+_DBG_COLUMNS = [
+    "timestamp", "service", "cls",
+    "detected", "cx", "cy", "area", "conf",
+    "buf_len",
+    "cx_rel", "cy_rel", "area_rel",
+    "cx_vote", "cy_vote", "area_vote", "score",
+    "raw_dir", "final_dir",
+]
+
+
+def start_direction_debug(path: str) -> None:
+    """Start writing per-frame direction debug data to *path* (CSV)."""
+    global _dbg_file, _dbg_writer
+    with _dbg_lock:
+        if _dbg_file is not None:
+            _dbg_file.close()
+        _dbg_file = open(path, "w", newline="", encoding="utf-8")
+        _dbg_writer = csv.DictWriter(_dbg_file, fieldnames=_DBG_COLUMNS)
+        _dbg_writer.writeheader()
+        _dbg_file.flush()
+    log.info(f"Direction debug logging started → {path}")
+
+
+def stop_direction_debug() -> None:
+    """Flush and close the direction debug CSV."""
+    global _dbg_file, _dbg_writer
+    with _dbg_lock:
+        if _dbg_file is not None:
+            _dbg_file.flush()
+            _dbg_file.close()
+            _dbg_file = None
+            _dbg_writer = None
+    log.info("Direction debug logging stopped.")
+
+
+def _dbg_write(row: dict) -> None:
+    """Write one row to the debug CSV; no-op when debug is not active."""
+    with _dbg_lock:
+        if _dbg_writer is not None:
+            _dbg_writer.writerow(row)
+            _dbg_file.flush()
+
 _PERSIST_PATH = os.path.expanduser("~/.visionq_services.json")
 _MAX_LOG = 50
 _MISS_TOLERANCE = 2       # consecutive frames without a car before buffer is cleared
 _MIN_DIR_FRAMES = 4       # minimum frames in buffer before direction is considered reliable
+_IDLE_HOLD_FRAMES = 5     # consecutive idle readings required before leaving a moving state
 
 
 def _best_device() -> str:
@@ -202,17 +255,40 @@ def _largest_box(result, class_name: str | None = None):
     return max(boxes, key=lambda b: _bbox_area(b))
 
 
-def _determine_direction(history: list[tuple[float, float, float]]) -> str:
+def _determine_direction(
+    history: list[tuple[float, float, float]],
+    use_area: bool = True,
+    forward_threshold: int = 1,
+    backward_threshold: int = -3,
+    signal_threshold: float = 0.005,
+    debug_out: Optional[dict] = None,
+) -> str:
     """Determine direction from a history of (cx, cy, area) tuples.
 
     Uses linear regression on three signals independently, then votes:
       - cx  decreasing (moving left)  → forward point
       - cy  increasing (moving down)  → forward point
-      - area increasing (getting bigger) → forward point
-    2+ signals agree → forward / backward.  Otherwise → idle.
+      - area increasing (getting bigger) → forward point  (only when use_area=True)
+    forward_threshold+ signals agree → forward.
+    backward_threshold- signals agree → backward.  Otherwise → idle.
 
     Camera assumption: cars enter upper-right and move diagonally toward
     lower-left when driving forward (approaching the gate).
+
+    Args:
+        use_area: When False, the area signal is excluded from voting.
+            Use False for car_rear to avoid the "partial-reveal" artefact:
+            as a departing car enters the frame from an edge its bbox grows
+            (area increases) even though the car is moving away, which creates
+            a false forward vote that masks the correct backward signal from
+            the centroid.
+        forward_threshold: Score at or above which "forward" is returned.
+            Defaults to 1 — any single signal agreeing is enough. Handles
+            turning cars where centroid movement is curved (near-zero linear
+            slope) but area is consistently growing.
+        backward_threshold: Score at or below which "backward" is returned.
+            Defaults to -3 (all three signals must agree).  Set to -2 when
+            use_area=False so that two centroid signals agreeing is sufficient.
     """
     if len(history) < _MIN_DIR_FRAMES:
         return "idle"
@@ -237,38 +313,55 @@ def _determine_direction(history: list[tuple[float, float, float]]) -> str:
     area_mean = sum(areas) / n
 
     # Normalize: slope as a fraction of the signal's mean (relative rate of change per frame)
-    THRESHOLD = 0.01  # 1% of mean per frame
     cx_rel   = _slope(cxs)   / cx_mean   if cx_mean   > 0 else 0.0
     cy_rel   = _slope(cys)   / cy_mean   if cy_mean   > 0 else 0.0
     area_rel = _slope(areas) / area_mean if area_mean > 0 else 0.0
 
+    thr = signal_threshold
+
     # Score: +1 = forward signal, -1 = backward signal
     score = 0
-    if cx_rel < -THRESHOLD:    # moving left  → forward
-        score += 1
-    elif cx_rel > THRESHOLD:   # moving right → backward
-        score -= 1
+    cx_vote = cy_vote = area_vote = 0
 
-    if cy_rel > THRESHOLD:     # moving down  → forward
-        score += 1
-    elif cy_rel < -THRESHOLD:  # moving up    → backward
-        score -= 1
+    if cx_rel < -thr:
+        score += 1;  cx_vote = 1
+    elif cx_rel > thr:
+        score -= 1;  cx_vote = -1
 
-    if area_rel > THRESHOLD:   # getting bigger  → forward
-        score += 1
-    elif area_rel < -THRESHOLD:  # getting smaller → backward
-        score -= 1
+    if cy_rel > thr:
+        score += 1;  cy_vote = 1
+    elif cy_rel < -thr:
+        score -= 1;  cy_vote = -1
 
-    if score >= 2:
-        # A clearly shrinking box means the car is getting farther away — physically
-        # impossible to be moving forward. Clamp to idle to avoid false "forward"
-        # when only the rear bumper is drifting out through the lower-left corner.
-        if area_rel < -THRESHOLD:
-            return "idle"
-        return "forward"
-    if score <= -3:   # all 3 signals must agree — backward is intentionally harder to trigger
-        return "backward"
-    return "idle"
+    if use_area:
+        if area_rel > thr:
+            score += 1;  area_vote = 1
+        elif area_rel < -thr:
+            score -= 1;  area_vote = -1
+
+    if score >= forward_threshold:
+        if use_area and area_rel < -thr:
+            result = "idle"
+        else:
+            result = "forward"
+    elif score <= backward_threshold:
+        result = "backward"
+    else:
+        result = "idle"
+
+    if debug_out is not None:
+        debug_out.update({
+            "cx_rel":    round(cx_rel,    6),
+            "cy_rel":    round(cy_rel,    6),
+            "area_rel":  round(area_rel,  6),
+            "cx_vote":   cx_vote,
+            "cy_vote":   cy_vote,
+            "area_vote": area_vote,
+            "score":     score,
+            "raw_dir":   result,
+        })
+
+    return result
 
 
 def _invert_direction(direction: str) -> str:
@@ -407,7 +500,13 @@ def _make_flask_app(
             if not detected:
                 current_state = "no_car"
             elif len(hist) >= _MIN_DIR_FRAMES:
-                raw = _determine_direction(hist)
+                if cls_name == "car_rear":
+                    # For car_rear, exclude the area signal to avoid the partial-reveal
+                    # artefact (bbox grows as the car enters frame even though it's leaving),
+                    # and require only 2 centroid signals to agree (threshold -2 instead of -3).
+                    raw = _determine_direction(hist, use_area=False, forward_threshold=2, backward_threshold=-2, signal_threshold=0.005)
+                else:
+                    raw = _determine_direction(hist)
                 current_state = _invert_direction(raw) if cls_name == "car_rear" else raw
             else:
                 current_state = None  # still building
@@ -441,9 +540,16 @@ def _make_flask_app(
             should_report = False
             for cls_name, res in (("car", car_res), ("car_rear", rear_res)):
                 cs = res["_current_state"]
-                if cs is not None and cs != _http_state[cls_name]:
-                    _http_state[cls_name] = cs
-                    should_report = True
+                prev = _http_state[cls_name]
+                if cs is None or cs == prev:
+                    continue
+                # Don't emit "idle" as the very first state after the car appears —
+                # wait for a definitive direction so the report is no_car → forward/backward,
+                # not no_car → idle → forward/backward.
+                if cs == "idle" and prev in ("", "no_car"):
+                    continue
+                _http_state[cls_name] = cs
+                should_report = True
         elif strict_output:
             car_ok  = car_res["detected"]  and car_res["_current_state"]  is not None
             rear_ok = rear_res["detected"] and rear_res["_current_state"] is not None
@@ -526,7 +632,7 @@ class DetectionService:
     @staticmethod
     def _make_class_state() -> dict:
         return {
-            cls: {"buffer": deque(maxlen=8), "misses": 0, "last_state": ""}
+            cls: {"buffer": deque(maxlen=8), "misses": 0, "last_state": "", "idle_streak": 0}
             for cls in ("car", "car_rear")
         }
 
@@ -1084,6 +1190,23 @@ class DetectionService:
         self._record_enabled = False
         self._close_video_writer()
 
+    # ── Direction debug helpers ────────────────────────────────────────────────
+
+    @property
+    def is_direction_debugging(self) -> bool:
+        with _dbg_lock:
+            return _dbg_file is not None
+
+    def start_direction_debug(self, path: str) -> None:
+        """Start writing per-frame direction signals to a CSV at *path*."""
+        self._dbg_path = path
+        start_direction_debug(path)
+
+    def stop_direction_debug(self) -> str:
+        """Flush and close the direction debug CSV. Returns the file path."""
+        stop_direction_debug()
+        return getattr(self, "_dbg_path", "")
+
     @property
     def is_previewing(self) -> bool:
         return self._preview_enabled
@@ -1198,12 +1321,68 @@ class DetectionService:
             buf_list = list(buf)
             if not detected:
                 current_state = "no_car"
+                state["idle_streak"] = 0
+                _dbg_write({
+                    "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+                    "service": service_name, "cls": cls_name,
+                    "detected": False, "cx": "", "cy": "", "area": "", "conf": "",
+                    "buf_len": 0, "cx_rel": "", "cy_rel": "", "area_rel": "",
+                    "cx_vote": "", "cy_vote": "", "area_vote": "", "score": "",
+                    "raw_dir": "no_car", "final_dir": "no_car",
+                })
             elif len(buf_list) >= _MIN_DIR_FRAMES:
-                raw = _determine_direction(buf_list)
+                dbg: dict = {}
+                if cls_name == "car_rear":
+                    raw = _determine_direction(
+                        buf_list, use_area=False, forward_threshold=2,
+                        backward_threshold=-2, signal_threshold=0.005,
+                        debug_out=dbg,
+                    )
+                else:
+                    raw = _determine_direction(buf_list, debug_out=dbg)
                 # car_rear direction signals are physically inverted vs car
-                current_state = _invert_direction(raw) if cls_name == "car_rear" else raw
+                resolved = _invert_direction(raw) if cls_name == "car_rear" else raw
+
+                # Hysteresis: don't flip back to idle on a brief slowdown.
+                # Only switch away from a moving state after _IDLE_HOLD_FRAMES
+                # consecutive idle readings.
+                if resolved == "idle" and state["last_state"] in ("forward", "backward"):
+                    state["idle_streak"] += 1
+                    if state["idle_streak"] < _IDLE_HOLD_FRAMES:
+                        resolved = state["last_state"]  # hold previous direction
+                else:
+                    state["idle_streak"] = 0
+
+                current_state = resolved
+                last_entry = buf_list[-1]
+                _dbg_write({
+                    "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+                    "service": service_name, "cls": cls_name,
+                    "detected": True,
+                    "cx":   round(last_entry[0], 1),
+                    "cy":   round(last_entry[1], 1),
+                    "area": round(last_entry[2], 1),
+                    "conf": round(confidence, 3),
+                    "buf_len": len(buf_list),
+                    **dbg,
+                    "final_dir": resolved,
+                })
             else:
                 current_state = None  # still building
+                last_entry = buf_list[-1] if buf_list else (0, 0, 0)
+                _dbg_write({
+                    "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+                    "service": service_name, "cls": cls_name,
+                    "detected": True,
+                    "cx":   round(last_entry[0], 1),
+                    "cy":   round(last_entry[1], 1),
+                    "area": round(last_entry[2], 1),
+                    "conf": round(confidence, 3),
+                    "buf_len": len(buf_list),
+                    "cx_rel": "", "cy_rel": "", "area_rel": "",
+                    "cx_vote": "", "cy_vote": "", "area_vote": "", "score": "",
+                    "raw_dir": "building", "final_dir": "building",
+                })
 
             class_results[cls_name] = {
                 "detected":       detected,
@@ -1232,9 +1411,16 @@ class DetectionService:
             should_report = False
             for cls_name in ("car", "car_rear"):
                 cs = class_results[cls_name]["_current_state"]
-                if cs is not None and cs != self._class_state[cls_name]["last_state"]:
-                    self._class_state[cls_name]["last_state"] = cs
-                    should_report = True
+                prev = self._class_state[cls_name]["last_state"]
+                if cs is None or cs == prev:
+                    continue
+                # Don't emit "idle" as the very first state after the car appears —
+                # wait for a definitive direction so the report is no_car → forward/backward,
+                # not no_car → idle → forward/backward.
+                if cs == "idle" and prev in ("", "no_car"):
+                    continue
+                self._class_state[cls_name]["last_state"] = cs
+                should_report = True
         elif strict_output:
             car_ok  = (class_results["car"]["detected"]
                        and class_results["car"]["_current_state"] is not None)

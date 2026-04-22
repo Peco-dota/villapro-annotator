@@ -885,6 +885,11 @@ class ServiceRow(QFrame):
         self._preview_btn.clicked.connect(self._toggle_preview)
         top.addWidget(self._preview_btn)
 
+        self._debug_btn = _btn("⏺  Debug", "#1a2e1a", "#1f3d1f", "#86efac", border_color="#1f3d1f")
+        self._debug_btn.setFixedWidth(84)
+        self._debug_btn.clicked.connect(self._toggle_direction_debug)
+        top.addWidget(self._debug_btn)
+
         self._more_btn = QPushButton("⋯")
         self._more_btn.setFixedWidth(34)
         self._more_btn.setStyleSheet("""
@@ -1021,12 +1026,16 @@ class ServiceRow(QFrame):
         svc = self._registry.get_service(self._cfg.name)
         is_recording = svc.is_recording if svc else (self._cfg.record_stream and can_record)
         is_previewing = svc.is_previewing if svc else False
+        is_debugging = svc.is_direction_debugging if svc else False
         self._record_btn.setVisible(can_record)
         self._record_btn.setEnabled(running and can_record)
         self._record_btn.setText("■  Rec Off" if is_recording else "●  Rec")
         self._preview_btn.setVisible(can_record)
         self._preview_btn.setEnabled(running and can_record)
         self._preview_btn.setText("■  Preview" if is_previewing else "👁  Preview")
+        self._debug_btn.setVisible(can_record)
+        self._debug_btn.setEnabled(running and can_record)
+        self._debug_btn.setText("■  Debug" if is_debugging else "⏺  Debug")
 
         if running:
             self._dot.setStyleSheet("color: #4ade80; font-size: 16px;")
@@ -1094,6 +1103,33 @@ class ServiceRow(QFrame):
             if err:
                 QMessageBox.warning(self.window(), "Recording", err)
                 return
+        self._refresh()
+
+    def _toggle_direction_debug(self):
+        svc = self._registry.get_service(self._cfg.name)
+        if svc is None:
+            return
+        if not svc.is_running:
+            QMessageBox.warning(self.window(), "Direction Debug", "Start the service first.")
+            return
+        if svc.is_direction_debugging:
+            path = svc.stop_direction_debug()
+            QMessageBox.information(
+                self.window(), "Direction Debug",
+                f"Debug log saved to:\n{path}"
+            )
+        else:
+            import os
+            from datetime import datetime
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_dir = os.path.expanduser("~/VisionQ_debug")
+            os.makedirs(out_dir, exist_ok=True)
+            path = os.path.join(out_dir, f"direction_{self._cfg.name}_{ts}.csv")
+            svc.start_direction_debug(path)
+            QMessageBox.information(
+                self.window(), "Direction Debug",
+                f"Capturing to:\n{path}\n\nClick Debug again to stop."
+            )
         self._refresh()
 
     def _toggle_preview(self):
