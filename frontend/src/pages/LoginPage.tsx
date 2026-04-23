@@ -1,13 +1,14 @@
 import { useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { setToken } from '../lib/auth'
-import { api } from '../lib/api'
+import { setToken, setUser } from '../lib/auth'
+import { login } from '../lib/api'
 import { Button } from '../components/ui/Button'
 import { Input } from '../components/ui/Input'
 import { Spinner } from '../components/ui/Spinner'
 
 export function LoginPage() {
-  const [token, setTokenState] = useState('')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const navigate = useNavigate()
@@ -17,27 +18,13 @@ export function LoginPage() {
     setError('')
     setLoading(true)
     try {
-      setToken(token.trim())
-      await api.get('/api/system/info')
+      const data = await login(username.trim(), password)
+      setToken(data.access_token)
+      setUser({ username: data.username, role: data.role })
       navigate('/')
-    } catch {
-      setToken('')
-      setError('Invalid token or server unreachable.')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const tryBootstrap = async () => {
-    setLoading(true)
-    setError('')
-    try {
-      setToken('__bootstrap__')
-      await api.get('/api/system/info')
-      navigate('/')
-    } catch {
-      setToken('')
-      setError('Server not reachable. Make sure the VisionQ server is running.')
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+      setError(msg ?? 'Server unreachable. Make sure the VisionQ server is running.')
     } finally {
       setLoading(false)
     }
@@ -60,30 +47,35 @@ export function LoginPage() {
         <div className="bg-slate-900 border border-slate-700 rounded-xl p-6 shadow-2xl">
           <form onSubmit={submit} className="flex flex-col gap-4">
             <Input
-              label="API Token"
-              type="password"
-              placeholder="Paste your bearer token..."
-              value={token}
-              onChange={e => setTokenState(e.target.value)}
+              label="Username"
+              type="text"
+              placeholder="admin"
+              value={username}
+              onChange={e => setUsername(e.target.value)}
               autoFocus
             />
+            <Input
+              label="Password"
+              type="password"
+              placeholder="••••••••"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+            />
             {error && <p className="text-xs text-red-400 -mt-1">{error}</p>}
-            <Button type="submit" variant="primary" size="lg" disabled={loading || !token.trim()}>
+            <Button
+              type="submit"
+              variant="primary"
+              size="lg"
+              disabled={loading || !username.trim() || !password}
+            >
               {loading ? <Spinner size={14} /> : null}
-              Connect
+              Sign in
             </Button>
           </form>
 
-          <div className="mt-4 pt-4 border-t border-slate-700/60 text-center">
-            <p className="text-xs text-slate-500 mb-2">First time? Server in bootstrap mode?</p>
-            <button
-              onClick={tryBootstrap}
-              disabled={loading}
-              className="text-xs text-violet-400 hover:text-violet-300 underline underline-offset-2 disabled:opacity-40"
-            >
-              Connect without token (bootstrap mode)
-            </button>
-          </div>
+          <p className="text-xs text-slate-600 text-center mt-4">
+            Default credentials: admin / admin123 · customer / customer123
+          </p>
         </div>
       </div>
     </div>

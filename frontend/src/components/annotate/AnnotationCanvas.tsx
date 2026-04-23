@@ -11,7 +11,19 @@ interface Props {
   classes: ClassDef[]
   selectedClass: number
   tool: 'draw' | 'select'
+  selectedBoxId: string | null
+  onSelectBox: (id: string | null) => void
   onBoxesChange: (boxes: BoundingBox[]) => void
+  onSelectClass: (i: number) => void
+  zoom: number                        // multiplier: 1 = fit, >1 = zoomed in
+  onZoomChange: (z: number) => void
+  onFitScaleChange?: (fs: number) => void
+}
+
+interface PendingBox {
+  box: BoundingBox
+  screenX: number
+  screenY: number
 }
 
 function useImage(src: string) {
@@ -28,55 +40,122 @@ function useImage(src: string) {
   return { img, naturalW: size.w, naturalH: size.h }
 }
 
-function uuid() {
-  return crypto.randomUUID()
+function uuid() { return crypto.randomUUID() }
+
+function ClassPickerPopup({ classes, screenX, screenY, onPick, onCancel }: {
+  classes: ClassDef[]
+  screenX: number
+  screenY: number
+  onPick: (i: number) => void
+  onCancel: () => void
+}) {
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onCancel()
+      const n = parseInt(e.key)
+      if (n >= 1 && n <= 9 && n - 1 < classes.length) onPick(n - 1)
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [classes, onPick, onCancel])
+
+  return (
+    <div
+      className="absolute z-20 bg-[#0f172a] border border-[#334155] rounded-lg shadow-xl py-1 min-w-36"
+      style={{ left: screenX, top: screenY }}
+      onClick={e => e.stopPropagation()}
+    >
+      <p className="text-[10px] text-slate-500 px-3 py-1 uppercase tracking-wider font-semibold">Assign class</p>
+      {classes.map((cls, i) => (
+        <button
+          key={i}
+          onClick={() => onPick(i)}
+          className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-[#1e293b] cursor-pointer text-left"
+        >
+          <span className="w-3 h-3 rounded-sm shrink-0" style={{ background: cls.color }} />
+          <span className="text-sm text-slate-200 flex-1">{cls.name}</span>
+          <span className="text-[10px] text-slate-600">{i + 1}</span>
+        </button>
+      ))}
+      <div className="border-t border-[#1e293b] mt-1 pt-1">
+        <button
+          onClick={onCancel}
+          className="w-full text-left px-3 py-1 text-xs text-slate-500 hover:text-slate-300 cursor-pointer"
+        >
+          Cancel (Esc)
+        </button>
+      </div>
+    </div>
+  )
 }
 
-export function AnnotationCanvas({ projectPath, filename, boxes, classes, selectedClass, tool, onBoxesChange }: Props) {
+export function AnnotationCanvas({
+  projectPath, filename, boxes, classes, selectedClass, tool,
+  selectedBoxId, onSelectBox, onBoxesChange, onSelectClass,
+  zoom, onZoomChange, onFitScaleChange,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const stageRef = useRef<Konva.Stage>(null)
   const trRef = useRef<Konva.Transformer>(null)
   const [stageSize, setStageSize] = useState({ w: 800, h: 600 })
-  const [scale, setScale] = useState(1)
-  const [offset, setOffset] = useState({ x: 0, y: 0 })
+  const [fitScale, setFitScale] = useState(1)  // scale that fits image to window
+  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 })
   const [drawing, setDrawing] = useState<{ x: number; y: number } | null>(null)
   const [draft, setDraft] = useState<{ x: number; y: number; w: number; h: number } | null>(null)
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [pending, setPending] = useState<PendingBox | null>(null)
+  const isPanning = useRef(false)
+  const panStart = useRef({ x: 0, y: 0 })
+  const panOffsetStart = useRef({ x: 0, y: 0 })
+
   const imgSrc = filename ? getImageFile(projectPath, filename) : ''
   const { img, naturalW, naturalH } = useImage(imgSrc)
 
-  // fit image to canvas
+  // scale = fitScale * zoom, offset centers image then adjusts for pan
+  const scale = fitScale * zoom
+  const offset = {
+    x: (stageSize.w - naturalW * scale) / 2 + panOffset.x,
+    y: (stageSize.h - naturalH * scale) / 2 + panOffset.y,
+  }
+
+  // recalculate fit scale on resize or new image
   useEffect(() => {
     const el = containerRef.current
     if (!el || !naturalW || !naturalH) return
-    const obs = new ResizeObserver(() => {
+    const measure = () => {
       const cw = el.clientWidth
       const ch = el.clientHeight
       setStageSize({ w: cw, h: ch })
-      const sc = Math.min(cw / naturalW, ch / naturalH, 1)
-      setScale(sc)
-      setOffset({
-        x: (cw - naturalW * sc) / 2,
-        y: (ch - naturalH * sc) / 2,
-      })
-    })
+      const fs = Math.min(cw / naturalW, ch / naturalH, 1)
+      setFitScale(fs)
+      onFitScaleChange?.(fs)
+    }
+    measure()
+    const obs = new ResizeObserver(measure)
     obs.observe(el)
     return () => obs.disconnect()
   }, [naturalW, naturalH])
 
-  useEffect(() => { setSelectedId(null) }, [filename])
+  // reset pan when image changes
+  useEffect(() => { setPanOffset({ x: 0, y: 0 }) }, [filename])
 
-  // attach transformer to selected node
+  // attach transformer
   useEffect(() => {
     if (!trRef.current || !stageRef.current) return
-    if (selectedId) {
-      const node = stageRef.current.findOne(`#box-${selectedId}`)
+    if (selectedBoxId) {
+      const node = stageRef.current.findOne(`#box-${selectedBoxId}`)
       if (node) trRef.current.nodes([node])
     } else {
       trRef.current.nodes([])
     }
     trRef.current.getLayer()?.batchDraw()
-  }, [selectedId, boxes])
+  }, [selectedBoxId, boxes])
+
+  // scroll-wheel zoom
+  const handleWheel = useCallback((e: Konva.KonvaEventObject<WheelEvent>) => {
+    e.evt.preventDefault()
+    const delta = e.evt.deltaY < 0 ? 1.1 : 1 / 1.1
+    onZoomChange(Math.max(0.1, Math.min(zoom * delta, 8)))
+  }, [zoom, onZoomChange])
 
   const toNorm = useCallback((px: number, py: number) => ({
     nx: (px - offset.x) / (naturalW * scale),
@@ -86,14 +165,29 @@ export function AnnotationCanvas({ projectPath, filename, boxes, classes, select
   const getColor = (idx: number) => classes[idx]?.color ?? '#a78bfa'
 
   const handleMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
+    if (pending) return
+    // Middle-click or space+left = pan
+    if (e.evt.button === 1 || (e.evt.button === 0 && e.evt.altKey)) {
+      isPanning.current = true
+      panStart.current = { x: e.evt.clientX, y: e.evt.clientY }
+      panOffsetStart.current = { ...panOffset }
+      return
+    }
     if (tool !== 'draw') return
     const pos = e.target.getStage()!.getPointerPosition()!
     setDrawing({ x: pos.x, y: pos.y })
     setDraft(null)
-    setSelectedId(null)
+    onSelectBox(null)
   }
 
   const handleMouseMove = (e: Konva.KonvaEventObject<MouseEvent>) => {
+    if (isPanning.current) {
+      setPanOffset({
+        x: panOffsetStart.current.x + (e.evt.clientX - panStart.current.x),
+        y: panOffsetStart.current.y + (e.evt.clientY - panStart.current.y),
+      })
+      return
+    }
     if (!drawing) return
     const pos = e.target.getStage()!.getPointerPosition()!
     setDraft({
@@ -104,7 +198,8 @@ export function AnnotationCanvas({ projectPath, filename, boxes, classes, select
     })
   }
 
-  const handleMouseUp = () => {
+  const handleMouseUp = (e: Konva.KonvaEventObject<MouseEvent>) => {
+    if (isPanning.current) { isPanning.current = false; return }
     if (!drawing || !draft || draft.w < 5 || draft.h < 5) {
       setDrawing(null); setDraft(null); return
     }
@@ -124,27 +219,42 @@ export function AnnotationCanvas({ projectPath, filename, boxes, classes, select
       w: Math.min(w, 1),
       h: Math.min(h, 1),
     }
-    onBoxesChange([...boxes, box])
+
     setDrawing(null)
     setDraft(null)
-    setSelectedId(box.id)
+
+    if (classes.length <= 1) {
+      onBoxesChange([...boxes, box])
+      onSelectBox(box.id)
+    } else {
+      const popupX = Math.min(draft.x + draft.w + 8, stageSize.w - 160)
+      const popupY = Math.min(draft.y, stageSize.h - 200)
+      setPending({ box, screenX: popupX, screenY: popupY })
+      void e
+    }
   }
 
+  const commitPending = useCallback((classIndex: number) => {
+    if (!pending) return
+    const box = { ...pending.box, class_index: classIndex }
+    onSelectClass(classIndex)
+    onBoxesChange([...boxes, box])
+    onSelectBox(box.id)
+    setPending(null)
+  }, [pending, boxes, onBoxesChange, onSelectBox, onSelectClass])
+
   const handleBoxClick = (id: string) => {
-    if (tool === 'select') setSelectedId(id === selectedId ? null : id)
+    if (tool === 'select') onSelectBox(id === selectedBoxId ? null : id)
   }
 
   const handleBoxTransformEnd = (id: string, node: Konva.Rect) => {
-    const scaleX = node.scaleX()
-    const scaleY = node.scaleY()
+    const scaleX = node.scaleX(); const scaleY = node.scaleY()
     node.scaleX(1); node.scaleY(1)
-
     const x = node.x() + node.width() * scaleX / 2
     const y = node.y() + node.height() * scaleY / 2
     const { nx: cx, ny: cy } = toNorm(x, y)
     const w = (node.width() * scaleX) / (naturalW * scale)
     const h = (node.height() * scaleY) / (naturalH * scale)
-
     onBoxesChange(boxes.map(b => b.id === id
       ? { ...b, cx: Math.max(0, Math.min(1, cx)), cy: Math.max(0, Math.min(1, cy)), w: Math.min(w, 1), h: Math.min(h, 1) }
       : b
@@ -161,25 +271,6 @@ export function AnnotationCanvas({ projectPath, filename, boxes, classes, select
     ))
   }
 
-  const deleteSelected = useCallback(() => {
-    if (selectedId) {
-      onBoxesChange(boxes.filter(b => b.id !== selectedId))
-      setSelectedId(null)
-    }
-  }, [selectedId, boxes, onBoxesChange])
-
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId) {
-        const tag = (e.target as HTMLElement).tagName
-        if (tag === 'INPUT' || tag === 'TEXTAREA') return
-        deleteSelected()
-      }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [deleteSelected, selectedId])
-
   const boxToRect = (b: BoundingBox) => ({
     x: offset.x + (b.cx - b.w / 2) * naturalW * scale,
     y: offset.y + (b.cy - b.h / 2) * naturalH * scale,
@@ -187,8 +278,11 @@ export function AnnotationCanvas({ projectPath, filename, boxes, classes, select
     height: b.h * naturalH * scale,
   })
 
+  const draftColor = getColor(pending ? pending.box.class_index : selectedClass)
+  const cursor = isPanning.current ? 'grabbing' : tool === 'draw' ? 'crosshair' : 'default'
+
   return (
-    <div ref={containerRef} className="flex-1 overflow-hidden bg-[#0c0a14] relative" style={{ cursor: tool === 'draw' ? 'crosshair' : 'default' }}>
+    <div ref={containerRef} className="flex-1 overflow-hidden relative" style={{ background: '#2a2a2a', cursor }}>
       <Stage
         ref={stageRef}
         width={stageSize.w}
@@ -196,14 +290,14 @@ export function AnnotationCanvas({ projectPath, filename, boxes, classes, select
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
-        onClick={(e) => { if (e.target === e.target.getStage()) setSelectedId(null) }}
+        onWheel={handleWheel}
+        onClick={(e) => { if (e.target === e.target.getStage() && !pending) onSelectBox(null) }}
       >
         <Layer>
           {img && (
             <KonvaImage
               image={img}
-              x={offset.x}
-              y={offset.y}
+              x={offset.x} y={offset.y}
               width={naturalW * scale}
               height={naturalH * scale}
             />
@@ -218,8 +312,8 @@ export function AnnotationCanvas({ projectPath, filename, boxes, classes, select
                 id={`box-${b.id}`}
                 x={r.x} y={r.y} width={r.width} height={r.height}
                 stroke={color}
-                strokeWidth={selectedId === b.id ? 2 : 1.5}
-                fill={selectedId === b.id ? color + '22' : color + '11'}
+                strokeWidth={selectedBoxId === b.id ? 2 : 1.5}
+                fill={selectedBoxId === b.id ? color + '22' : color + '11'}
                 draggable={tool === 'select'}
                 onClick={() => handleBoxClick(b.id)}
                 onDragEnd={e => handleDragEnd(b.id, e.target as Konva.Rect)}
@@ -228,14 +322,22 @@ export function AnnotationCanvas({ projectPath, filename, boxes, classes, select
             )
           })}
 
-          {draft && (
+          {pending && (() => {
+            const r = boxToRect(pending.box)
+            return (
+              <Rect
+                x={r.x} y={r.y} width={r.width} height={r.height}
+                stroke={draftColor} strokeWidth={1.5} fill={draftColor + '22'}
+                dash={[4, 4]} listening={false}
+              />
+            )
+          })()}
+
+          {draft && !pending && (
             <Rect
               x={draft.x} y={draft.y} width={draft.w} height={draft.h}
-              stroke={getColor(selectedClass)}
-              strokeWidth={1.5}
-              fill={getColor(selectedClass) + '22'}
-              dash={[4, 4]}
-              listening={false}
+              stroke={draftColor} strokeWidth={1.5} fill={draftColor + '22'}
+              dash={[4, 4]} listening={false}
             />
           )}
 
@@ -247,11 +349,26 @@ export function AnnotationCanvas({ projectPath, filename, boxes, classes, select
         </Layer>
       </Stage>
 
+      {pending && (
+        <ClassPickerPopup
+          classes={classes}
+          screenX={pending.screenX}
+          screenY={pending.screenY}
+          onPick={commitPending}
+          onCancel={() => setPending(null)}
+        />
+      )}
+
       {!img && filename && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="w-6 h-6 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
         </div>
       )}
+
+      {/* Zoom indicator */}
+      <div className="absolute bottom-2 right-2 text-[10px] text-slate-600 bg-[#0f172a]/70 px-2 py-0.5 rounded pointer-events-none">
+        {Math.round(zoom * 100)}%
+      </div>
     </div>
   )
 }

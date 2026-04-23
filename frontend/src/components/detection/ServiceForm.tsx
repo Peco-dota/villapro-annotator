@@ -1,9 +1,10 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { createService, updateService } from '../../lib/api'
 import type { ServiceConfig } from '../../lib/types'
 import { Modal } from '../ui/Modal'
 import { Input } from '../ui/Input'
+import { PathInput } from '../ui/PathInput'
 import { Button } from '../ui/Button'
 import { Spinner } from '../ui/Spinner'
 
@@ -14,29 +15,65 @@ interface Props {
 }
 
 const defaults: Omit<ServiceConfig, 'name'> = {
-  model_path: 'yolo11n.pt',
-  mode: 'rtsp',
-  source: '',
-  confidence: 0.5,
-  iou: 0.45,
-  device: '',
-  imgsz: 640,
-  classes: [],
-  gate_area_threshold: 0.15,
+  model_path: 'yolo26n.pt',
+  input_mode: 'rtsp',
+  input_host: '0.0.0.0',
+  input_port: 5050,
+  output_host: '127.0.0.1',
+  output_port: 6060,
+  rtsp_user: 'admin',
+  rtsp_password: '',
+  rtsp_ip: '192.168.1.1',
+  rtsp_port: 554,
+  rtsp_channel: 'Streaming/Channels/102',
+  rtsp_interval: 0.25,
+  video_path: '',
+  video_loop: true,
+  conf_threshold: 0.5,
+  gate_area_threshold: 0,
+  strict_output: false,
+  state_changes_only: false,
   auto_start: false,
-  record_video: false,
+  record_stream: false,
   record_dir: '',
-  debug_csv: false,
-  tcp_host: '0.0.0.0',
-  tcp_port: 9000,
-  tcp_ssl: false,
-  preview: false,
+  dataset_capture: false,
+  dataset_interval: 10,
+  dataset_dir: '',
+}
+
+function Section({ label }: { label: string }) {
+  return (
+    <div className="flex items-center gap-3 pt-2">
+      <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest shrink-0">{label}</p>
+      <div className="flex-1 h-px bg-slate-800" />
+    </div>
+  )
+}
+
+function Check({ label, checked, onChange, hint }: { label: string; checked: boolean; onChange: (v: boolean) => void; hint?: string }) {
+  return (
+    <label className="flex items-start gap-2 cursor-pointer select-none">
+      <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} className="accent-violet-500 mt-0.5" />
+      <div>
+        <span className="text-sm text-slate-300">{label}</span>
+        {hint && <p className="text-xs text-slate-600 mt-0.5">{hint}</p>}
+      </div>
+    </label>
+  )
 }
 
 export function ServiceForm({ open, onClose, existing }: Props) {
   const qc = useQueryClient()
-  const [form, setForm] = useState<ServiceConfig>(existing ?? { name: '', ...defaults })
+  const isEdit = !!existing
+  const [form, setForm] = useState<ServiceConfig>({ name: '', ...defaults })
   const [err, setErr] = useState('')
+
+  useEffect(() => {
+    if (open) {
+      setErr('')
+      setForm(existing ? { ...existing } : { name: '', ...defaults })
+    }
+  }, [open, existing])
 
   const set = (k: keyof ServiceConfig) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     const val = e.target.type === 'checkbox'
@@ -44,85 +81,170 @@ export function ServiceForm({ open, onClose, existing }: Props) {
       : e.target.type === 'number' ? +e.target.value : e.target.value
     setForm(f => ({ ...f, [k]: val }))
   }
+  const setVal = (k: keyof ServiceConfig) => (v: string) => setForm(f => ({ ...f, [k]: v }))
+  const setBool = (k: keyof ServiceConfig) => (v: boolean) => setForm(f => ({ ...f, [k]: v }))
+
+  // Computed RTSP URL preview
+  const rtspUrl = form.input_mode === 'rtsp'
+    ? `rtsp://${form.rtsp_user ? `${form.rtsp_user}:***@` : ''}${form.rtsp_ip || '<ip>'}:${form.rtsp_port}/${form.rtsp_channel}`
+    : ''
 
   const mut = useMutation({
-    mutationFn: () => existing
-      ? updateService(existing.name, form)
-      : createService(form),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['services'] })
-      onClose()
-    },
-    onError: (e: unknown) => {
-      const msg = (e as { response?: { data?: { detail?: string } } }).response?.data?.detail ?? 'Error'
-      setErr(msg)
-    },
+    mutationFn: () => isEdit ? updateService(existing!.name, form) : createService(form),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['services'] }); onClose() },
+    onError: (e: unknown) => setErr((e as { response?: { data?: { detail?: string } } }).response?.data?.detail ?? 'Error saving service.'),
   })
 
+  const canSave = form.name.trim() &&
+    form.model_path.trim() &&
+    (form.input_mode !== 'rtsp' || (form.rtsp_ip.trim() && form.rtsp_user.trim())) &&
+    (form.input_mode !== 'video' || form.video_path.trim())
+
   return (
-    <Modal open={open} onClose={onClose} title={existing ? `Edit: ${existing.name}` : 'New Detection Service'} width="max-w-lg">
-      <div className="flex flex-col gap-3 max-h-[70vh] overflow-y-auto pr-1">
-        {!existing && <Input label="Service name" value={form.name} onChange={set('name')} placeholder="camera-1" />}
-        <Input label="Model path" value={form.model_path} onChange={set('model_path')} placeholder="yolo11n.pt" />
+    <Modal open={open} onClose={onClose} title={isEdit ? `Edit: ${existing!.name}` : 'New Detection Service'} width="max-w-xl">
+      <div className="flex flex-col gap-3 max-h-[82vh] overflow-y-auto pr-1">
 
-        <div className="flex flex-col gap-1">
-          <label className="text-xs font-medium text-slate-400 uppercase tracking-wider">Mode</label>
-          <select
-            value={form.mode}
-            onChange={set('mode')}
-            className="bg-slate-800 border border-slate-600 rounded px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-violet-500"
-          >
-            <option value="rtsp">RTSP</option>
-            <option value="video">Video file</option>
-            <option value="http">HTTP POST</option>
-          </select>
-        </div>
-
-        {form.mode !== 'http' && (
-          <Input label="Source URL / file path" value={form.source} onChange={set('source')} placeholder="rtsp://... or /path/to/video.mp4" />
+        {/* Name */}
+        {!isEdit && (
+          <Input label="Service name" value={form.name} onChange={set('name')}
+            placeholder="e.g. gate_1_in, gate_2_out…" autoFocus />
         )}
 
-        <div className="grid grid-cols-2 gap-3">
-          <Input label="Confidence" type="number" step="0.05" min="0" max="1" value={form.confidence} onChange={set('confidence')} />
-          <Input label="IoU" type="number" step="0.05" min="0" max="1" value={form.iou} onChange={set('iou')} />
-          <Input label="Image size" type="number" value={form.imgsz} onChange={set('imgsz')} />
-          <Input label="Gate area threshold" type="number" step="0.01" value={form.gate_area_threshold} onChange={set('gate_area_threshold')} />
-        </div>
+        {/* Model */}
+        <PathInput label="Model path (.pt / .onnx)" value={form.model_path}
+          onChange={setVal('model_path')} filter="model"
+          placeholder="yolo26n.pt" pickerTitle="Select YOLO model" />
 
-        <Input label="Device (cpu/cuda/mps, blank=auto)" value={form.device} onChange={set('device')} />
+        {/* ── Input source ── */}
+        <Section label="Input source" />
 
-        <div className="grid grid-cols-2 gap-3">
-          <Input label="TCP host" value={form.tcp_host} onChange={set('tcp_host')} />
-          <Input label="TCP port" type="number" value={form.tcp_port} onChange={set('tcp_port')} />
-        </div>
-
-        <div className="grid grid-cols-2 gap-2 pt-1">
-          {([
-            ['auto_start', 'Auto-start'],
-            ['record_video', 'Record video'],
-            ['debug_csv', 'Debug CSV'],
-            ['tcp_ssl', 'TCP SSL'],
-            ['preview', 'Preview'],
-          ] as [keyof ServiceConfig, string][]).map(([k, label]) => (
-            <label key={k} className="flex items-center gap-2 cursor-pointer text-sm text-slate-300">
-              <input type="checkbox" checked={!!form[k]} onChange={set(k)} className="accent-violet-500" />
-              {label}
-            </label>
+        {/* Mode selector */}
+        <div className="flex gap-1 p-1 bg-slate-800 rounded-lg">
+          {(['http', 'rtsp', 'video'] as const).map(m => (
+            <button
+              key={m}
+              onClick={() => setForm(f => ({ ...f, input_mode: m }))}
+              className={`flex-1 py-1.5 rounded text-xs font-medium cursor-pointer transition-colors
+                ${form.input_mode === m ? 'bg-violet-700 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              {m === 'http' ? 'HTTP endpoint' : m === 'rtsp' ? 'RTSP camera' : 'Video file'}
+            </button>
           ))}
         </div>
 
-        {form.record_video && (
-          <Input label="Record output dir" value={form.record_dir} onChange={set('record_dir')} />
+        {form.input_mode === 'rtsp' && (
+          <>
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="Username" value={form.rtsp_user} onChange={set('rtsp_user')} placeholder="admin" />
+              <Input label="Password" type="password" value={form.rtsp_password} onChange={set('rtsp_password')} />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="Camera IP" value={form.rtsp_ip} onChange={set('rtsp_ip')} placeholder="192.168.1.1" />
+              <Input label="RTSP port" type="number" value={form.rtsp_port} onChange={set('rtsp_port')} />
+            </div>
+            <Input label="Channel path" value={form.rtsp_channel} onChange={set('rtsp_channel')}
+              placeholder="Streaming/Channels/102" />
+            <Input label="Frame interval (s)" type="number" step="0.05" min="0.05" max="10"
+              value={form.rtsp_interval} onChange={set('rtsp_interval')} />
+            {/* RTSP URL preview */}
+            <div className="bg-[#0f172a] border border-[#1e293b] rounded px-3 py-2">
+              <p className="text-[10px] text-slate-600 mb-1">Stream URL preview</p>
+              <p className="text-xs text-slate-400 font-mono break-all">{rtspUrl}</p>
+            </div>
+          </>
         )}
+
+        {form.input_mode === 'video' && (
+          <>
+            <PathInput label="Video file" value={form.video_path} onChange={setVal('video_path')}
+              filter="video" placeholder="/data/video.mp4" pickerTitle="Select video file" />
+            <Input label="Frame interval (s)" type="number" step="0.05" min="0.05" max="10"
+              value={form.rtsp_interval} onChange={set('rtsp_interval')} />
+            <Check label="Loop video" checked={form.video_loop} onChange={setBool('video_loop')} />
+          </>
+        )}
+
+        {form.input_mode === 'http' && (
+          <div className="grid grid-cols-2 gap-3">
+            <Input label="Listen host" value={form.input_host} onChange={set('input_host')} placeholder="0.0.0.0" />
+            <Input label="Listen port" type="number" value={form.input_port} onChange={set('input_port')} />
+          </div>
+        )}
+
+        {/* ── Output ── */}
+        <Section label="Output push" />
+        <p className="text-xs text-slate-600">Detection results (JSON) are pushed via HTTP POST to:</p>
+        <div className="grid grid-cols-2 gap-3">
+          <Input label="Output host" value={form.output_host} onChange={set('output_host')} />
+          <Input label="Output port" type="number" value={form.output_port} onChange={set('output_port')} />
+        </div>
+
+        {/* ── Detection settings ── */}
+        <Section label="Detection settings" />
+        <div className="grid grid-cols-2 gap-3">
+          <Input label="Confidence threshold" type="number" step="0.05" min="0.01" max="1"
+            value={form.conf_threshold} onChange={set('conf_threshold')} />
+        </div>
+        <div className="flex flex-col gap-2">
+          <Check label="State changes only"
+            checked={form.state_changes_only} onChange={setBool('state_changes_only')}
+            hint="Emit output only on state transitions (e.g. idle→forward)" />
+          <Check label="Strict output (known direction only)"
+            checked={form.strict_output} onChange={setBool('strict_output')} />
+        </div>
+
+        {/* ── Gate trigger ── */}
+        <Section label="Gate trigger" />
+        <Input
+          label="Min bounding box area (px²) — 0 = disabled"
+          type="number" step="10000" min="0"
+          value={form.gate_area_threshold} onChange={set('gate_area_threshold')}
+        />
+        <p className="text-xs text-slate-600">
+          Emit gate_open=true when a car is idle and its bbox area ≥ this value (px²).
+          Set to 0 to disable. Use the Debug CSV to read the 'area' column while the car is stationary.
+        </p>
+
+        {/* ── Dataset capture ── */}
+        <Section label="Dataset capture" />
+        <Check label="Save raw frames to dataset folder"
+          checked={form.dataset_capture} onChange={setBool('dataset_capture')} />
+        {form.dataset_capture && (
+          <>
+            <Input label="Capture every N frames" type="number" min="1" max="1000"
+              value={form.dataset_interval} onChange={set('dataset_interval')} />
+            <PathInput label="Output folder (blank = auto)"
+              value={form.dataset_dir} onChange={setVal('dataset_dir')}
+              filter="dir" dirOnly={true} placeholder="Leave blank for default"
+              pickerTitle="Select dataset folder" />
+          </>
+        )}
+
+        {/* ── Recording ── */}
+        <Section label="Input recording" />
+        <Check label="Auto-start recording when service starts (RTSP/video only)"
+          checked={form.record_stream} onChange={setBool('record_stream')}
+          hint="Recording FPS is set automatically from the frame interval above." />
+        {form.record_stream && (
+          <PathInput label="Recording folder (blank = ~/VisionQ_recordings/)"
+            value={form.record_dir} onChange={setVal('record_dir')}
+            filter="dir" dirOnly={true} placeholder="Leave blank for default"
+            pickerTitle="Select recording folder" />
+        )}
+
+        {/* ── Misc ── */}
+        <Section label="Other" />
+        <Check label="Auto-start this service when VisionQ server starts"
+          checked={form.auto_start} onChange={setBool('auto_start')} />
 
         {err && <p className="text-xs text-red-400">{err}</p>}
       </div>
 
       <div className="flex gap-2 justify-end pt-4 border-t border-slate-700 mt-3">
         <Button variant="ghost" onClick={onClose}>Cancel</Button>
-        <Button variant="primary" onClick={() => mut.mutate()} disabled={mut.isPending || !form.name}>
+        <Button variant="primary" onClick={() => mut.mutate()} disabled={mut.isPending || !canSave}>
           {mut.isPending ? <Spinner size={12} /> : null}
-          {existing ? 'Save' : 'Create'}
+          {isEdit ? 'Save' : '▶  Save & Start'}
         </Button>
       </div>
     </Modal>

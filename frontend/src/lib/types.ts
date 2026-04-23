@@ -1,6 +1,8 @@
 export interface ClassDef {
+  id: number
   name: string
   color: string
+  annotation_count?: number
 }
 
 export interface BoundingBox {
@@ -33,32 +35,52 @@ export interface ImageEntry {
 export interface ServiceConfig {
   name: string
   model_path: string
-  mode: 'http' | 'rtsp' | 'video'
-  source: string
-  confidence: number
-  iou: number
-  device: string
-  imgsz: number
-  classes: number[]
+  input_mode: 'http' | 'rtsp' | 'video'
+  // HTTP mode
+  input_host: string
+  input_port: number
+  output_host: string
+  output_port: number
+  // RTSP mode
+  rtsp_user: string
+  rtsp_password: string
+  rtsp_ip: string
+  rtsp_port: number
+  rtsp_channel: string
+  rtsp_interval: number
+  // Video mode
+  video_path: string
+  video_loop: boolean
+  // Detection
+  conf_threshold: number
   gate_area_threshold: number
+  strict_output: boolean
+  state_changes_only: boolean
+  // Misc
   auto_start: boolean
-  record_video: boolean
+  // Recording
+  record_stream: boolean
   record_dir: string
-  debug_csv: boolean
-  tcp_host: string
-  tcp_port: number
-  tcp_ssl: boolean
-  preview: boolean
+  // Dataset capture
+  dataset_capture: boolean
+  dataset_interval: number
+  dataset_dir: string
 }
 
 export interface ServiceStatus {
   name: string
+  state: string
   running: boolean
-  direction: string
-  gate_open: boolean
-  fps: number
-  frame_count: number
-  error: string | null
+  error: string
+  is_recording: boolean
+  is_previewing: boolean
+  is_direction_debugging: boolean
+  is_dataset_capturing: boolean
+  last_payload: {
+    car?: { detected: boolean; direction: string; confidence: number }
+    car_rear?: { detected: boolean; direction: string; confidence: number }
+    gate?: { open: boolean }
+  }
 }
 
 export interface DetectionResult {

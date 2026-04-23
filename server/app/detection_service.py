@@ -82,6 +82,22 @@ def _dbg_write(row: dict) -> None:
             _dbg_writer.writerow(row)
             _dbg_file.flush()
 
+def _notify_internal(service_name: str, payload: dict) -> None:
+    """Fan result out to internal SSE subscribers and the in-memory buffer.
+
+    Safe to call from any background thread — deferred import avoids circular imports.
+    """
+    try:
+        from app.routers.detection import _notify_sse, _result_buffer
+        from collections import deque as _deque
+        _notify_sse(service_name, payload)
+        if service_name not in _result_buffer:
+            _result_buffer[service_name] = _deque(maxlen=100)
+        _result_buffer[service_name].appendleft(payload)
+    except Exception:
+        pass  # never break the detection thread over a notification failure
+
+
 _PERSIST_PATH = os.path.expanduser("~/.visionq_services.json")
 _MAX_LOG = 50
 _MISS_TOLERANCE = 2       # consecutive frames without a car before buffer is cleared
@@ -528,6 +544,7 @@ def _make_flask_app(
 
         payload = {
             "service_name": service_name,
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
             "car": {
                 "detected":   car_res["detected"],
                 "direction":  car_res["direction"],
@@ -565,6 +582,7 @@ def _make_flask_app(
 
         if should_report:
             log_callback(LogEntry.from_result(payload))
+            _notify_internal(payload.get("service_name", "unknown"), payload)
             if output_url:
                 try:
                     requests.post(output_url, json=payload, timeout=2)
@@ -609,6 +627,7 @@ class DetectionService:
         # Per-class tracking state for direction (RTSP/video mode)
         self._class_state: dict[str, dict] = self._make_class_state()
         self._gate_last_open: bool = False
+        self._last_payload: dict = {}   # last result payload for status polling
         # Live preview — processing thread puts annotated frames here;
         # the Qt main thread polls and renders them (maxsize=1 keeps only latest)
         self._preview_enabled: bool = False
@@ -864,6 +883,8 @@ class DetectionService:
                         cfg.dataset_dir, self._dataset_frame_count,
                         cfg.gate_area_threshold,
                     )
+                    if frame_summary:
+                        self._last_payload = frame_summary
                     if self._record_enabled:
                         self._record_input_frame(
                             service_name=cfg.name,
@@ -1053,7 +1074,7 @@ class DetectionService:
                     with torch.no_grad():
                         results = m(frame, conf=cfg.conf_threshold, verbose=False)
                     self._dataset_frame_count += 1
-                    self._process_rtsp_frame(
+                    _vs = self._process_rtsp_frame(
                         results, frame, output_url, cfg.name,
                         cfg.strict_output,
                         cfg.state_changes_only,
@@ -1061,6 +1082,8 @@ class DetectionService:
                         cfg.dataset_dir, self._dataset_frame_count,
                         cfg.gate_area_threshold,
                     )
+                    if _vs:
+                        self._last_payload = _vs
                     if self._record_enabled:
                         self._record_input_frame(
                             service_name=cfg.name,
@@ -1250,6 +1273,30 @@ class DetectionService:
         except queue.Empty:
             return None
 
+    # ── Dataset capture toggle ─────────────────────────────────────────────────
+
+    @property
+    def is_dataset_capturing(self) -> bool:
+        cfg = self._config
+        return cfg is not None and cfg.dataset_capture
+
+    def start_dataset_capture(self, dataset_dir: str = "", interval: int = 10) -> str:
+        if self._state != STATE_RUNNING:
+            return "Service must be running before dataset capture can start."
+        cfg = self._config
+        if cfg is None:
+            return "No config."
+        if dataset_dir:
+            cfg.dataset_dir = dataset_dir
+        cfg.dataset_interval = interval
+        cfg.dataset_capture = True
+        return ""
+
+    def stop_dataset_capture(self):
+        cfg = self._config
+        if cfg is not None:
+            cfg.dataset_capture = False
+
     # ── Video playback controls ────────────────────────────────────────────────
 
     def set_video_speed(self, speed: float):
@@ -1431,6 +1478,7 @@ class DetectionService:
 
         payload = {
             "service_name": service_name,
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
             "car": {
                 "detected":   car_res["detected"],
                 "direction":  car_res["direction"],
@@ -1480,6 +1528,7 @@ class DetectionService:
 
         if should_report:
             self._append_log(LogEntry.from_result(payload))
+            _notify_internal(service_name, payload)
             if output_url:
                 threading.Thread(
                     target=self._push_result,

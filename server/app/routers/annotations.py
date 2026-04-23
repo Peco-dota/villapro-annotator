@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.auth import require_token
+from app.auth import require_user
 from app.annotation import BoundingBox
 from app.routers.projects import _get_project
 
@@ -15,7 +15,7 @@ router = APIRouter(prefix="/api/annotations", tags=["annotations"])
 # ── Box CRUD ──────────────────────────────────────────────────────────────────
 
 @router.get("/")
-def get_annotations(project_path: str, filename: str, _token: str = Depends(require_token)):
+def get_annotations(project_path: str, filename: str, _user: dict = Depends(require_user)):
     p = _get_project(project_path)
     ia = p.annotations.get(filename)
     if ia is None:
@@ -57,7 +57,7 @@ class BoxesReplaceRequest(BaseModel):
 
 
 @router.post("/", status_code=201)
-def add_box(req: BoxCreateRequest, _token: str = Depends(require_token)):
+def add_box(req: BoxCreateRequest, _user: dict = Depends(require_user)):
     p = _get_project(req.project_path)
     if req.filename not in p.images:
         raise HTTPException(status_code=404, detail="Image not in project.")
@@ -79,7 +79,7 @@ def add_box(req: BoxCreateRequest, _token: str = Depends(require_token)):
 
 
 @router.patch("/")
-def update_box(req: BoxUpdateRequest, _token: str = Depends(require_token)):
+def update_box(req: BoxUpdateRequest, _user: dict = Depends(require_user)):
     p = _get_project(req.project_path)
     ia = p.annotations.get(req.filename)
     if ia is None:
@@ -105,7 +105,7 @@ def update_box(req: BoxUpdateRequest, _token: str = Depends(require_token)):
 
 
 @router.delete("/")
-def delete_box(req: BoxDeleteRequest, _token: str = Depends(require_token)):
+def delete_box(req: BoxDeleteRequest, _user: dict = Depends(require_user)):
     p = _get_project(req.project_path)
     ia = p.annotations.get(req.filename)
     if ia is None:
@@ -122,7 +122,7 @@ def delete_box(req: BoxDeleteRequest, _token: str = Depends(require_token)):
 
 
 @router.put("/replace")
-def replace_boxes(req: BoxesReplaceRequest, _token: str = Depends(require_token)):
+def replace_boxes(req: BoxesReplaceRequest, _user: dict = Depends(require_user)):
     """Replace ALL boxes for an image in one call (used by canvas after drag/resize)."""
     p = _get_project(req.project_path)
     if req.filename not in p.images:
@@ -142,7 +142,7 @@ def replace_boxes(req: BoxesReplaceRequest, _token: str = Depends(require_token)
 
 
 @router.post("/copy-from-prev")
-def copy_boxes_from_prev(project_path: str, filename: str, _token: str = Depends(require_token)):
+def copy_boxes_from_prev(project_path: str, filename: str, _user: dict = Depends(require_user)):
     """Copy all boxes from the previous image to the given image."""
     p = _get_project(project_path)
     if filename not in p.images:
@@ -167,7 +167,7 @@ def copy_boxes_from_prev(project_path: str, filename: str, _token: str = Depends
 
 
 @router.post("/navigate")
-def set_current_index(project_path: str, index: int, _token: str = Depends(require_token)):
+def set_current_index(project_path: str, index: int, _user: dict = Depends(require_user)):
     """Set which image is 'current' in the project (for auto-save tracking)."""
     p = _get_project(project_path)
     if index < 0 or index >= len(p.images):

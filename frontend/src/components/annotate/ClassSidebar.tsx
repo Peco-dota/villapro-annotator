@@ -1,8 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { addClass, deleteClass } from '../../lib/api'
+import { addClass } from '../../lib/api'
 import type { ClassDef, BoundingBox } from '../../lib/types'
-import { Button } from '../ui/Button'
 
 interface Props {
   classes: ClassDef[]
@@ -10,73 +9,122 @@ interface Props {
   selectedClass: number
   projectPath: string
   onSelectClass: (i: number) => void
+  onSelectBox: (id: string) => void
+  onDeleteBox: (id: string) => void
+  selectedBoxId: string | null
 }
 
-export function ClassSidebar({ classes, boxes, selectedClass, projectPath, onSelectClass }: Props) {
+const sectionHeader = (label: string) => (
+  <div
+    className="px-3 flex items-center shrink-0"
+    style={{ height: 36, background: '#0f172a', borderBottom: '1px solid #1e293b' }}
+  >
+    <span className="text-[10px] font-bold text-[#64748b] uppercase tracking-widest">{label}</span>
+  </div>
+)
+
+export function ClassSidebar({ classes, boxes, selectedClass, projectPath, onSelectClass, onSelectBox, onDeleteBox, selectedBoxId }: Props) {
   const qc = useQueryClient()
-  const [adding, setAdding] = useState(false)
   const [newName, setNewName] = useState('')
 
   const addMut = useMutation({
     mutationFn: () => addClass(projectPath, newName.trim()),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['project', projectPath] })
+      qc.invalidateQueries({ queryKey: ['classes', projectPath] })
       setNewName('')
-      setAdding(false)
     },
   })
 
-  const delMut = useMutation({
-    mutationFn: (index: number) => deleteClass(projectPath, index),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['project', projectPath] }),
-  })
-
-  const countFor = (i: number) => boxes.filter(b => b.class_index === i).length
+  const countForCurrent = (i: number) => boxes.filter(b => b.class_index === i).length
 
   return (
-    <div className="flex flex-col h-full bg-[#13111c] border-l border-slate-800 min-w-[180px]">
-      <div className="px-3 py-2.5 border-b border-slate-800 flex items-center justify-between">
-        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Classes</p>
+    <div
+      className="flex flex-col h-full bg-[#16213e] border-l border-[#1e293b] overflow-hidden"
+      style={{ width: 220, minWidth: 220 }}
+    >
+      {/* ── CLASSES ── */}
+      {sectionHeader('Classes')}
+
+      {/* Add class input */}
+      <div className="flex gap-1.5 px-2 py-2 border-b border-[#1e293b] shrink-0">
+        <input
+          value={newName}
+          onChange={e => setNewName(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && newName.trim()) addMut.mutate() }}
+          placeholder="New class name..."
+          className="flex-1 bg-[#0f172a] border border-[#334155] rounded px-2 py-1 text-[11px] text-slate-100
+            placeholder:text-slate-600 focus:outline-none focus:border-violet-600"
+        />
         <button
-          onClick={() => setAdding(v => !v)}
-          className="text-xs text-violet-400 hover:text-violet-300 cursor-pointer"
+          onClick={() => { if (newName.trim()) addMut.mutate() }}
+          className="w-7 h-7 bg-violet-700 hover:bg-violet-600 text-white rounded text-base font-bold cursor-pointer flex items-center justify-center"
         >+</button>
       </div>
+      <p className="text-[9px] text-[#334155] px-3 pb-1 shrink-0">Press 1–9 to select class</p>
 
-      {adding && (
-        <div className="px-3 py-2 border-b border-slate-800 flex gap-2">
-          <input
-            autoFocus
-            value={newName}
-            onChange={e => setNewName(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter' && newName.trim()) addMut.mutate() }}
-            placeholder="class name"
-            className="flex-1 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-xs text-slate-100 focus:outline-none focus:border-violet-500"
-          />
-          <Button size="sm" variant="primary" onClick={() => addMut.mutate()} disabled={!newName.trim()}>OK</Button>
-        </div>
-      )}
-
-      <div className="flex-1 overflow-y-auto py-1">
-        {classes.map((cls, i) => (
-          <button
-            key={i}
-            onClick={() => onSelectClass(i)}
-            className={`w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors group cursor-pointer
-              ${i === selectedClass ? 'bg-slate-800' : 'hover:bg-slate-800/50'}`}
-          >
-            <span
-              className="w-3 h-3 rounded-sm shrink-0 ring-1 ring-white/10"
-              style={{ background: cls.color }}
-            />
-            <span className="flex-1 text-xs text-slate-300 truncate">{cls.name}</span>
-            <span className="text-xs text-slate-600 group-hover:text-slate-400">{countFor(i)}</span>
+      {/* Class list — fixed height like original */}
+      <div className="overflow-y-auto shrink-0" style={{ maxHeight: 180 }}>
+        {classes.map((cls, i) => {
+          const active = i === selectedClass
+          return (
             <button
-              onClick={e => { e.stopPropagation(); delMut.mutate(i) }}
-              className="opacity-0 group-hover:opacity-100 text-slate-600 hover:text-red-400 text-sm leading-none cursor-pointer"
-            >&times;</button>
-          </button>
-        ))}
+              key={i}
+              onClick={() => onSelectClass(i)}
+              className={`w-full flex items-center gap-2 px-2 py-1.5 text-left cursor-pointer transition-colors
+                ${active ? 'bg-[#1e1b4b]' : 'hover:bg-[#1a2744]'} rounded`}
+            >
+              <span
+                className="w-5 h-5 rounded shrink-0 border border-[#475569]"
+                style={{ background: cls.color }}
+              />
+              <span className="flex-1 text-[11px] text-slate-200 truncate">{cls.name}</span>
+              <span className="text-[10px] text-[#64748b] min-w-4 text-right" title="Total annotations across all images">
+                {cls.annotation_count ?? countForCurrent(i)}
+              </span>
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Separator */}
+      <div className="h-px bg-[#1e293b] shrink-0" />
+
+      {/* ── ANNOTATIONS ── */}
+      {sectionHeader('Annotations')}
+
+      <div className="flex-1 overflow-y-auto">
+        {boxes.length === 0 ? (
+          <p className="text-[10px] text-[#334155] px-3 py-3">No boxes on this image</p>
+        ) : (
+          boxes.map((box) => {
+            const cls = classes[box.class_index]
+            const highlighted = box.id === selectedBoxId
+            return (
+              <button
+                key={box.id}
+                onClick={() => onSelectBox(box.id)}
+                className={`w-full flex items-center gap-2 px-2 py-1.5 text-left cursor-pointer transition-colors
+                  ${highlighted ? 'bg-[#1e1b4b]' : 'hover:bg-[#1a2744]'} rounded`}
+              >
+                <span
+                  className="w-3 h-3 rounded-sm shrink-0"
+                  style={{ background: cls?.color ?? '#7c3aed' }}
+                />
+                <span className="flex-1 text-[10px] text-slate-300 truncate">
+                  {cls?.name ?? `class ${box.class_index}`}
+                </span>
+                <span className="text-[9px] text-[#475569] shrink-0">
+                  cx:{box.cx.toFixed(2)} w:{box.w.toFixed(2)}
+                </span>
+                <button
+                  onClick={e => { e.stopPropagation(); onDeleteBox(box.id) }}
+                  className="text-[#ef4444] text-sm leading-none hover:opacity-100 opacity-60 cursor-pointer shrink-0"
+                >×</button>
+              </button>
+            )
+          })
+        )}
       </div>
     </div>
   )

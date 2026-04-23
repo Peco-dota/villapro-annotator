@@ -25,7 +25,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import init_config
 from app.version import VERSION
-from app.routers import system, projects, annotations, detection, datasets
+from app.routers import system, projects, annotations, detection, datasets, fs, auth
+from app.db import init_db
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,6 +38,7 @@ log = logging.getLogger("visionq")
 
 def create_app(config_path: str | None = None) -> FastAPI:
     cfg = init_config(config_path)
+    init_db()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -76,11 +78,13 @@ def create_app(config_path: str | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
+    app.include_router(auth.router)
     app.include_router(system.router)
     app.include_router(projects.router)
     app.include_router(annotations.router)
     app.include_router(detection.router)
     app.include_router(datasets.router)
+    app.include_router(fs.router)
 
     @app.get("/")
     def root():
@@ -91,6 +95,10 @@ def create_app(config_path: str | None = None) -> FastAPI:
         }
 
     return app
+
+
+# Module-level app for uvicorn --reload (e.g. `uvicorn main:app --reload`)
+app = create_app()
 
 
 def main():

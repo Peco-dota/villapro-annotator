@@ -1,13 +1,16 @@
 """Dataset operations — export, augmentation, split, batch export, training."""
 import os
+import queue
 import threading
 import uuid
+from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.auth import require_token
+from app.auth import require_user
 from app.augmentation import AugConfig, run_augmentation, augment_from_folder
 from app.utils import export_yolo, export_coco, batch_export_yolo, split_dataset
 from app.routers.projects import _get_project
@@ -16,6 +19,9 @@ router = APIRouter(prefix="/api/datasets", tags=["datasets"])
 
 # Simple job tracker for long-running operations
 _jobs: dict[str, dict] = {}  # job_id -> {status, result, error}
+
+# Training log queues: job_id -> queue of log lines (None = sentinel/done)
+_train_logs: dict[str, queue.Queue] = {}
 
 
 def _new_job() -> str:
@@ -33,7 +39,7 @@ def _job_failed(job_id: str, error: str):
 
 
 @router.get("/jobs/{job_id}")
-def get_job(job_id: str, _token: str = Depends(require_token)):
+def get_job(job_id: str, _user: dict = Depends(require_user)):
     job = _jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found.")
@@ -51,7 +57,7 @@ class ExportYoloRequest(BaseModel):
 
 @router.post("/export/yolo")
 def export_yolo_endpoint(req: ExportYoloRequest, background_tasks: BackgroundTasks,
-                         _token: str = Depends(require_token)):
+                         _user: dict = Depends(require_user)):
     p = _get_project(req.project_path)
     job_id = _new_job()
 
@@ -75,7 +81,7 @@ class ExportCocoRequest(BaseModel):
 
 @router.post("/export/coco")
 def export_coco_endpoint(req: ExportCocoRequest, background_tasks: BackgroundTasks,
-                         _token: str = Depends(require_token)):
+                         _user: dict = Depends(require_user)):
     p = _get_project(req.project_path)
     job_id = _new_job()
 
@@ -102,7 +108,7 @@ class BatchExportRequest(BaseModel):
 
 @router.post("/export/batch")
 def batch_export_endpoint(req: BatchExportRequest, background_tasks: BackgroundTasks,
-                          _token: str = Depends(require_token)):
+                          _user: dict = Depends(require_user)):
     for path in req.project_paths:
         if not os.path.isfile(path):
             raise HTTPException(status_code=400, detail=f"Project not found: {path}")
@@ -137,7 +143,7 @@ class SplitRequest(BaseModel):
 
 @router.post("/split")
 def split_dataset_endpoint(req: SplitRequest, background_tasks: BackgroundTasks,
-                           _token: str = Depends(require_token)):
+                           _user: dict = Depends(require_user)):
     if not os.path.isdir(req.folder):
         raise HTTPException(status_code=400, detail="Folder not found.")
 
@@ -223,7 +229,7 @@ def _build_aug_config(req) -> AugConfig:
 
 @router.post("/augment/project")
 def augment_project_endpoint(req: AugmentProjectRequest, background_tasks: BackgroundTasks,
-                             _token: str = Depends(require_token)):
+                             _user: dict = Depends(require_user)):
     p = _get_project(req.project_path)
     cfg = _build_aug_config(req)
     job_id = _new_job()
@@ -241,7 +247,7 @@ def augment_project_endpoint(req: AugmentProjectRequest, background_tasks: Backg
 
 @router.post("/augment/folder")
 def augment_folder_endpoint(req: AugmentFolderRequest, background_tasks: BackgroundTasks,
-                            _token: str = Depends(require_token)):
+                            _user: dict = Depends(require_user)):
     if not os.path.isdir(req.folder):
         raise HTTPException(status_code=400, detail="Folder not found.")
 
@@ -261,54 +267,137 @@ def augment_folder_endpoint(req: AugmentFolderRequest, background_tasks: Backgro
 
 # ── YOLO Training ─────────────────────────────────────────────────────────────
 
+MODELS_ROOT = Path.home() / "visionq-projects" / "models"
+
+
 class TrainRequest(BaseModel):
-    data_yaml: str          # path to data.yaml
-    model: str = "yolo11n.pt"  # base model or .pt weights file
-    epochs: int = 100
-    batch: int = 16
+    data_yaml: str
+    model: str = "yolo26n.pt"   # pretrained base model name or path to custom .pt
+    epochs: int = 50
+    batch: int = 8
     imgsz: int = 640
-    patience: int = 50
-    output_dir: str = ""    # project/name for ultralytics output
-    device: str = ""        # "cpu", "cuda", "mps", or "" for auto
+    patience: int = 15
+    run_name: str = "my_training"
+    device: str = ""             # "cpu", "cuda", "mps", or "" for auto
 
 
 @router.post("/train")
 def train_endpoint(req: TrainRequest, background_tasks: BackgroundTasks,
-                   _token: str = Depends(require_token)):
+                   _user: dict = Depends(require_user)):
     if not os.path.isfile(req.data_yaml):
         raise HTTPException(status_code=400, detail="data_yaml file not found.")
 
+    run_name = req.run_name.strip() or "my_training"
+    output_dir = MODELS_ROOT / run_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     job_id = _new_job()
+    log_q: queue.Queue = queue.Queue()
+    _train_logs[job_id] = log_q
+
+    def _log(msg: str):
+        log_q.put(msg)
 
     def _run():
         try:
             from app.detection_service import _best_device
             from ultralytics import YOLO
+            import io, sys
 
             device = req.device or _best_device()
-            model = YOLO(req.model)
+            _log(f"Model  : {req.model}")
+            _log(f"Dataset: {req.data_yaml}")
+            _log(f"Config : {req.epochs} epochs  batch={req.batch}  imgsz={req.imgsz}  patience={req.patience}")
+            _log(f"Device : {device}")
+            _log(f"Output : {output_dir}")
+            _log("─" * 52)
 
-            train_kwargs = dict(
+            model = YOLO(req.model)
+            total_epochs = req.epochs
+
+            def on_epoch_end(trainer):
+                ep = trainer.epoch + 1
+                m = trainer.metrics or {}
+                try:
+                    bl = trainer.loss_items[0].item()
+                    cl = trainer.loss_items[1].item() if len(trainer.loss_items) > 1 else 0
+                    dfl = trainer.loss_items[2].item() if len(trainer.loss_items) > 2 else 0
+                except Exception:
+                    bl = cl = dfl = 0
+                precision  = m.get("metrics/precision(B)", 0)
+                recall     = m.get("metrics/recall(B)", 0)
+                map50      = m.get("metrics/mAP50(B)", 0)
+                map5095    = m.get("metrics/mAP50-95(B)", 0)
+                _log(
+                    f"[{ep:>3}/{total_epochs}]  "
+                    f"loss: box={bl:.3f} cls={cl:.3f} dfl={dfl:.3f}  |  "
+                    f"P={precision:.3f}  R={recall:.3f}  "
+                    f"mAP50={map50:.3f}  mAP50-95={map5095:.3f}"
+                )
+
+            model.add_callback("on_train_epoch_end", on_epoch_end)
+
+            results = model.train(
                 data=req.data_yaml,
                 epochs=req.epochs,
                 batch=req.batch,
                 imgsz=req.imgsz,
                 patience=req.patience,
                 device=device,
+                project=str(MODELS_ROOT),
+                name=run_name,
+                exist_ok=True,
                 verbose=False,
             )
-            if req.output_dir:
-                train_kwargs["project"] = req.output_dir
 
-            results = model.train(**train_kwargs)
+            # Locate best.pt
+            best = output_dir / "weights" / "best.pt"
+            if not best.exists():
+                for pt in output_dir.rglob("best.pt"):
+                    best = pt
+                    break
 
-            best_model = str(results.best) if hasattr(results, "best") else ""
+            _log("─" * 52)
+            _log(f"Complete!  Best weights → {best}")
+
             _job_done(job_id, {
-                "best_model": best_model,
+                "best_model": str(best) if best.exists() else "",
+                "run_name": run_name,
+                "output_dir": str(output_dir),
                 "device": device,
             })
         except Exception as e:
+            import traceback
+            _log(f"ERROR: {e}")
+            _log(traceback.format_exc())
             _job_failed(job_id, str(e))
+        finally:
+            log_q.put(None)  # sentinel
 
     background_tasks.add_task(_run)
-    return {"job_id": job_id}
+    return {"job_id": job_id, "output_dir": str(output_dir)}
+
+
+@router.get("/train/log/{job_id}")
+def train_log_stream(job_id: str, request: Request, _user: dict = Depends(require_user)):
+    """SSE stream of training log lines for a given job."""
+    log_q = _train_logs.get(job_id)
+    if log_q is None:
+        raise HTTPException(status_code=404, detail="No log stream for this job.")
+
+    async def _generate():
+        import asyncio
+        loop = asyncio.get_event_loop()
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                line = await loop.run_in_executor(None, lambda: log_q.get(timeout=1))
+                if line is None:
+                    yield "event: done\ndata: \n\n"
+                    break
+                yield f"data: {line}\n\n"
+            except queue.Empty:
+                yield ": keep-alive\n\n"
+
+    return StreamingResponse(_generate(), media_type="text/event-stream")

@@ -5,11 +5,11 @@ import os
 from typing import Optional, AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from app.auth import require_token
+from app.auth import require_user
 from app.detection_service import (
     get_registry, ServiceConfig,
     STATE_STOPPED, STATE_LOADING, STATE_RUNNING, STATE_ERROR,
@@ -96,13 +96,13 @@ def _cfg_to_dict(cfg: ServiceConfig, registry) -> dict:
 
 
 @router.get("/services")
-def list_services(_token: str = Depends(require_token)):
+def list_services(_user: dict = Depends(require_user)):
     reg = get_registry()
     return [_cfg_to_dict(c, reg) for c in reg.get_configs()]
 
 
 @router.get("/services/{name}")
-def get_service(name: str, _token: str = Depends(require_token)):
+def get_service(name: str, _user: dict = Depends(require_user)):
     reg = get_registry()
     cfg = reg.get_config(name)
     if cfg is None:
@@ -111,7 +111,7 @@ def get_service(name: str, _token: str = Depends(require_token)):
 
 
 @router.post("/services", status_code=201)
-def create_or_update_service(req: ServiceConfigIn, _token: str = Depends(require_token)):
+def create_or_update_service(req: ServiceConfigIn, _user: dict = Depends(require_user)):
     cfg = ServiceConfig(
         name=req.name,
         model_path=req.model_path,
@@ -144,8 +144,27 @@ def create_or_update_service(req: ServiceConfigIn, _token: str = Depends(require
     return _cfg_to_dict(cfg, get_registry())
 
 
+class DuplicateRequest(BaseModel):
+    new_name: str
+
+
+@router.post("/services/{name}/duplicate", status_code=201)
+def duplicate_service(name: str, req: DuplicateRequest, _user: dict = Depends(require_user)):
+    reg = get_registry()
+    cfg = reg.get_config(name)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Service '{name}' not found.")
+    if reg.get_config(req.new_name) is not None:
+        raise HTTPException(status_code=409, detail=f"Service '{req.new_name}' already exists.")
+    import copy
+    new_cfg = copy.deepcopy(cfg)
+    new_cfg.name = req.new_name
+    reg.upsert_config(new_cfg)
+    return _cfg_to_dict(new_cfg, reg)
+
+
 @router.delete("/services/{name}")
-def delete_service(name: str, _token: str = Depends(require_token)):
+def delete_service(name: str, _user: dict = Depends(require_user)):
     reg = get_registry()
     if reg.get_config(name) is None:
         raise HTTPException(status_code=404, detail=f"Service '{name}' not found.")
@@ -157,7 +176,7 @@ def delete_service(name: str, _token: str = Depends(require_token)):
 # ── Start / stop ──────────────────────────────────────────────────────────────
 
 @router.post("/services/{name}/start")
-def start_service(name: str, _token: str = Depends(require_token)):
+def start_service(name: str, _user: dict = Depends(require_user)):
     reg = get_registry()
 
     def _on_done(error: str):
@@ -170,7 +189,7 @@ def start_service(name: str, _token: str = Depends(require_token)):
 
 
 @router.post("/services/{name}/stop")
-def stop_service(name: str, _token: str = Depends(require_token)):
+def stop_service(name: str, _user: dict = Depends(require_user)):
     reg = get_registry()
     if reg.get_config(name) is None:
         raise HTTPException(status_code=404, detail=f"Service '{name}' not found.")
@@ -179,7 +198,7 @@ def stop_service(name: str, _token: str = Depends(require_token)):
 
 
 @router.post("/services/{name}/restart")
-def restart_service(name: str, _token: str = Depends(require_token)):
+def restart_service(name: str, _user: dict = Depends(require_user)):
     reg = get_registry()
 
     def _on_done(error: str):
@@ -194,7 +213,7 @@ def restart_service(name: str, _token: str = Depends(require_token)):
 # ── Service status & log ──────────────────────────────────────────────────────
 
 @router.get("/services/{name}/status")
-def get_service_status(name: str, _token: str = Depends(require_token)):
+def get_service_status(name: str, _user: dict = Depends(require_user)):
     reg = get_registry()
     cfg = reg.get_config(name)
     if cfg is None:
@@ -203,15 +222,18 @@ def get_service_status(name: str, _token: str = Depends(require_token)):
     return {
         "name": name,
         "state": reg.get_state(name),
+        "running": reg.get_state(name) == STATE_RUNNING,
         "error": svc.error_msg if svc else "",
         "is_recording": svc.is_recording if svc else False,
         "is_previewing": svc.is_previewing if svc else False,
         "is_direction_debugging": svc.is_direction_debugging if svc else False,
+        "is_dataset_capturing": svc.is_dataset_capturing if svc else False,
+        "last_payload": svc._last_payload if svc else {},
     }
 
 
 @router.get("/services/{name}/log")
-def get_service_log(name: str, _token: str = Depends(require_token)):
+def get_service_log(name: str, _user: dict = Depends(require_user)):
     reg = get_registry()
     svc = reg.get_service(name)
     if svc is None:
@@ -223,7 +245,7 @@ def get_service_log(name: str, _token: str = Depends(require_token)):
 
 @router.post("/services/{name}/recording/start")
 def start_recording(name: str, record_dir: Optional[str] = None,
-                    _token: str = Depends(require_token)):
+                    _user: dict = Depends(require_user)):
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -234,7 +256,7 @@ def start_recording(name: str, record_dir: Optional[str] = None,
 
 
 @router.post("/services/{name}/recording/stop")
-def stop_recording(name: str, _token: str = Depends(require_token)):
+def stop_recording(name: str, _user: dict = Depends(require_user)):
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -246,7 +268,7 @@ def stop_recording(name: str, _token: str = Depends(require_token)):
 
 @router.post("/services/{name}/debug/start")
 def start_debug(name: str, path: Optional[str] = None,
-                _token: str = Depends(require_token)):
+                _user: dict = Depends(require_user)):
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -262,7 +284,7 @@ def start_debug(name: str, path: Optional[str] = None,
 
 
 @router.post("/services/{name}/debug/stop")
-def stop_debug(name: str, _token: str = Depends(require_token)):
+def stop_debug(name: str, _user: dict = Depends(require_user)):
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -273,7 +295,7 @@ def stop_debug(name: str, _token: str = Depends(require_token)):
 # ── Video controls ────────────────────────────────────────────────────────────
 
 @router.post("/services/{name}/video/pause")
-def toggle_pause(name: str, _token: str = Depends(require_token)):
+def toggle_pause(name: str, _user: dict = Depends(require_user)):
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -282,7 +304,7 @@ def toggle_pause(name: str, _token: str = Depends(require_token)):
 
 
 @router.post("/services/{name}/video/speed")
-def set_speed(name: str, speed: float, _token: str = Depends(require_token)):
+def set_speed(name: str, speed: float, _user: dict = Depends(require_user)):
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -292,7 +314,7 @@ def set_speed(name: str, speed: float, _token: str = Depends(require_token)):
 
 @router.post("/services/{name}/video/seek")
 def seek_video(name: str, ms: Optional[float] = None,
-               delta: Optional[float] = None, _token: str = Depends(require_token)):
+               delta: Optional[float] = None, _user: dict = Depends(require_user)):
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -306,7 +328,7 @@ def seek_video(name: str, ms: Optional[float] = None,
 
 
 @router.post("/services/{name}/video/step")
-def step_frame(name: str, _token: str = Depends(require_token)):
+def step_frame(name: str, _user: dict = Depends(require_user)):
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -315,12 +337,77 @@ def step_frame(name: str, _token: str = Depends(require_token)):
 
 
 @router.get("/services/{name}/video/state")
-def get_video_state(name: str, _token: str = Depends(require_token)):
+def get_video_state(name: str, _user: dict = Depends(require_user)):
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
     pos_ms, duration_ms, speed, paused = svc.get_video_state()
     return {"pos_ms": pos_ms, "duration_ms": duration_ms, "speed": speed, "paused": paused}
+
+
+# ── Preview frame (JPEG snapshot) ────────────────────────────────────────────
+
+@router.post("/services/{name}/preview/start")
+def start_preview(name: str, _user: dict = Depends(require_user)):
+    svc = get_registry().get_service(name)
+    if svc is None:
+        raise HTTPException(status_code=404, detail="Service not running.")
+    err = svc.start_preview()
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+    return {"preview": True}
+
+
+@router.post("/services/{name}/preview/stop")
+def stop_preview(name: str, _user: dict = Depends(require_user)):
+    svc = get_registry().get_service(name)
+    if svc is None:
+        raise HTTPException(status_code=404, detail="Service not running.")
+    svc.stop_preview()
+    return {"preview": False}
+
+
+@router.get("/services/{name}/preview/frame")
+def get_preview_frame(name: str, token: Optional[str] = None, _user: dict = Depends(require_user)):
+    """Return latest annotated frame as a JPEG image."""
+    svc = get_registry().get_service(name)
+    if svc is None:
+        raise HTTPException(status_code=404, detail="Service not running.")
+    frame = svc.get_preview_frame()
+    if frame is None:
+        raise HTTPException(status_code=204, detail="No frame available.")
+    import cv2
+    import numpy as np
+    # frame is a numpy array (annotated by ultralytics .plot())
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to encode frame.")
+    return Response(content=bytes(buf), media_type="image/jpeg")
+
+
+# ── Dataset capture ───────────────────────────────────────────────────────────
+
+@router.post("/services/{name}/dataset/start")
+def start_dataset(name: str, dataset_dir: Optional[str] = None,
+                  interval: Optional[int] = None, _user: dict = Depends(require_user)):
+    svc = get_registry().get_service(name)
+    cfg = get_registry().get_config(name)
+    if svc is None or cfg is None:
+        raise HTTPException(status_code=404, detail="Service not running.")
+    svc.start_dataset_capture(
+        dataset_dir or cfg.dataset_dir or os.path.expanduser("~/VisionQ_dataset"),
+        interval or cfg.dataset_interval or 10,
+    )
+    return {"dataset_capture": True}
+
+
+@router.post("/services/{name}/dataset/stop")
+def stop_dataset(name: str, _user: dict = Depends(require_user)):
+    svc = get_registry().get_service(name)
+    if svc is None:
+        raise HTTPException(status_code=404, detail="Service not running.")
+    svc.stop_dataset_capture()
+    return {"dataset_capture": False}
 
 
 # ── TCP push server management ────────────────────────────────────────────────
@@ -335,7 +422,7 @@ class TcpPushStartRequest(BaseModel):
 
 @router.post("/services/{name}/tcp/start")
 def start_tcp_push(name: str, req: TcpPushStartRequest,
-                   _token: str = Depends(require_token)):
+                   _user: dict = Depends(require_user)):
     reg = get_registry()
     if reg.get_config(name) is None:
         raise HTTPException(status_code=404, detail=f"Service '{name}' not found.")
@@ -353,13 +440,13 @@ def start_tcp_push(name: str, req: TcpPushStartRequest,
 
 
 @router.post("/services/{name}/tcp/stop")
-def stop_tcp_push(name: str, _token: str = Depends(require_token)):
+def stop_tcp_push(name: str, _user: dict = Depends(require_user)):
     get_tcp_registry().stop(name)
     return {"tcp_push": False}
 
 
 @router.get("/tcp/status")
-def tcp_status(_token: str = Depends(require_token)):
+def tcp_status(_user: dict = Depends(require_user)):
     return get_tcp_registry().get_status()
 
 
@@ -370,13 +457,17 @@ async def sse_stream(name: str, request: Request,
                      token: Optional[str] = None):
     """Server-Sent Events stream for live detection results.
 
-    Authentication: pass token as ?token=<value> query param
+    Authentication: pass JWT as ?token=<value> query param
     (Authorization header doesn't work well with EventSource in browsers).
     """
-    from app.config import get_config
-    cfg = get_config()
-    if cfg.get_tokens() and not cfg.validate_token(token or ""):
-        raise HTTPException(status_code=401, detail="Invalid or missing token.")
+    from app.auth import _SECRET, _ALGORITHM
+    from jose import JWTError, jwt as _jwt
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing token.")
+    try:
+        _jwt.decode(token, _SECRET, algorithms=[_ALGORITHM])
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token.")
 
     reg = get_registry()
     if reg.get_config(name) is None:
@@ -428,7 +519,7 @@ async def receive_result(request: Request):
 
 
 @router.get("/results/all")
-def get_all_results(_token: str = Depends(require_token)):
+def get_all_results(_user: dict = Depends(require_user)):
     """Return last N results per service (from in-memory buffer)."""
     return _result_buffer
 

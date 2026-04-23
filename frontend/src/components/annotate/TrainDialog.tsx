@@ -4,6 +4,7 @@ import { trainModel } from '../../lib/api'
 import { Modal } from '../ui/Modal'
 import { Button } from '../ui/Button'
 import { Input } from '../ui/Input'
+import { PathInput } from '../ui/PathInput'
 import { Spinner } from '../ui/Spinner'
 import { useJobPoller } from '../../lib/useJobPoller'
 
@@ -20,6 +21,9 @@ export function TrainDialog({ open, onClose }: Props) {
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm(f => ({ ...f, [k]: e.target.value }))
 
+  const setVal = (k: keyof typeof form) => (v: string) =>
+    setForm(f => ({ ...f, [k]: v }))
+
   const mut = useMutation({
     mutationFn: () => trainModel({
       ...form,
@@ -34,16 +38,40 @@ export function TrainDialog({ open, onClose }: Props) {
   return (
     <Modal open={open} onClose={onClose} title="Train YOLO Model" width="max-w-md">
       <div className="flex flex-col gap-3">
-        <Input label="data.yaml path" value={form.data_yaml} onChange={set('data_yaml')} placeholder="/data/export/data.yaml" />
-        <Input label="Base model" value={form.model} onChange={set('model')} placeholder="yolo11n.pt" />
+        <PathInput
+          label="data.yaml path"
+          value={form.data_yaml}
+          onChange={setVal('data_yaml')}
+          filter="yaml"
+          placeholder="/data/export/data.yaml"
+          pickerTitle="Select data.yaml file"
+        />
+        <PathInput
+          label="Base model (.pt / .onnx)"
+          value={form.model}
+          onChange={setVal('model')}
+          filter="model"
+          placeholder="yolo11n.pt"
+          pickerTitle="Select base model file"
+        />
+
         <div className="grid grid-cols-2 gap-3">
           <Input label="Epochs" type="number" value={form.epochs} onChange={set('epochs')} />
           <Input label="Batch size" type="number" value={form.batch} onChange={set('batch')} />
           <Input label="Image size" type="number" value={form.imgsz} onChange={set('imgsz')} />
           <Input label="Patience" type="number" value={form.patience} onChange={set('patience')} />
         </div>
-        <Input label="Output dir (optional)" value={form.output_dir} onChange={set('output_dir')} />
-        <Input label="Device (cpu/cuda/mps, blank=auto)" value={form.device} onChange={set('device')} />
+
+        <PathInput
+          label="Output directory (optional)"
+          value={form.output_dir}
+          onChange={setVal('output_dir')}
+          filter="dir"
+          dirOnly={true}
+          placeholder="/data/runs/"
+          pickerTitle="Select output folder"
+        />
+        <Input label="Device (cpu / cuda / mps — blank = auto)" value={form.device} onChange={set('device')} />
 
         {job && (
           <div className={`text-xs px-3 py-2 rounded ${job.status === 'done' ? 'bg-green-900/30 text-green-300' : job.status === 'failed' ? 'bg-red-900/30 text-red-300' : 'bg-slate-800 text-slate-400'}`}>

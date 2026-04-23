@@ -1,5 +1,3 @@
-import { Button } from '../ui/Button'
-
 interface Props {
   tool: 'draw' | 'select'
   onToolChange: (t: 'draw' | 'select') => void
@@ -13,61 +11,105 @@ interface Props {
   onNext: () => void
   onExport: () => void
   onTrain: () => void
+  onDetect: () => void
   saving: boolean
   imageName: string | null
   imageIndex: number
   imageTotal: number
+  onGoHome: () => void
+  zoom: number
+  onZoomIn: () => void
+  onZoomOut: () => void
+  onZoomFit: () => void
+  onZoom1to1: () => void
 }
+
+const iconBtn = (active = false) =>
+  `w-[34px] h-[34px] flex items-center justify-center rounded text-sm transition-colors cursor-pointer
+   border border-transparent
+   ${active
+     ? 'bg-[#1e1b4b] text-violet-400 border-violet-700'
+     : 'bg-transparent text-slate-400 hover:bg-[#1e293b] hover:text-slate-100 hover:border-slate-700'}`
+
+const groupLabel = 'text-[10px] text-[#334155] font-bold tracking-widest uppercase select-none'
+
+const actionBtn = (color: string) =>
+  `h-[34px] px-3.5 rounded text-xs font-bold text-white cursor-pointer transition-colors ${color}`
+
+const vSep = 'w-px h-5 bg-[#1e293b] shrink-0'
 
 export function Toolbar(props: Props) {
   return (
-    <div className="flex items-center gap-1.5 px-3 py-1.5 bg-[#17152a] border-b border-slate-800 flex-wrap">
-      {/* Tool toggle */}
-      <div className="flex rounded overflow-hidden border border-slate-700">
-        <button
-          onClick={() => props.onToolChange('select')}
-          title="Select (V)"
-          className={`px-2.5 py-1.5 text-xs transition-colors cursor-pointer ${props.tool === 'select' ? 'bg-violet-600 text-white' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M5 3l14 9-7 1-4 7z" />
-          </svg>
-        </button>
-        <button
-          onClick={() => props.onToolChange('draw')}
-          title="Draw (D)"
-          className={`px-2.5 py-1.5 text-xs transition-colors cursor-pointer ${props.tool === 'draw' ? 'bg-violet-600 text-white' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <rect x="3" y="3" width="18" height="18" rx="1" />
-          </svg>
-        </button>
-      </div>
+    <div className="flex items-center gap-1 px-3 h-[52px] bg-[#0f172a] border-b border-[#1e293b] shrink-0 overflow-x-auto">
+      {/* Back */}
+      <button className={iconBtn()} onClick={props.onGoHome} title="Back to Welcome">←</button>
+      <div className={vSep} />
 
-      <div className="w-px h-5 bg-slate-700" />
+      {/* Logo */}
+      <span className="text-violet-400 font-bold text-base tracking-wide px-2 shrink-0">◈ VisionQ</span>
+      <div className={vSep} />
 
-      <Button size="sm" variant="ghost" onClick={props.onUndo} disabled={!props.canUndo} title="Undo (Ctrl+Z)">↩</Button>
-      <Button size="sm" variant="ghost" onClick={props.onRedo} disabled={!props.canRedo} title="Redo (Ctrl+Y)">↪</Button>
+      {/* Tools */}
+      <span className={groupLabel}>Tools</span>
+      <button
+        className={iconBtn(props.tool === 'select')}
+        onClick={() => props.onToolChange('select')}
+        title="Select / Move (V)"
+      >⬚</button>
+      <button
+        className={iconBtn(props.tool === 'draw')}
+        onClick={() => props.onToolChange('draw')}
+        title="Draw Rectangle (R)"
+      >⬜</button>
+      <div className={vSep} />
 
-      <div className="w-px h-5 bg-slate-700" />
+      {/* Zoom */}
+      <span className={groupLabel}>Zoom</span>
+      <button className={iconBtn()} onClick={props.onZoomOut} title="Zoom Out (-)">－</button>
+      <button className={iconBtn()} onClick={props.onZoomIn} title="Zoom In (+)">＋</button>
+      <button className={iconBtn()} onClick={props.onZoomFit} title="Fit to Window (F)">⊡</button>
+      <button className={`${iconBtn()} !w-[40px]`} onClick={props.onZoom1to1} title="100% actual pixels">1:1</button>
+      <div className={vSep} />
 
-      <Button size="sm" variant="ghost" onClick={props.onPrev} title="Prev image (A)">‹ Prev</Button>
-      <span className="text-xs text-slate-500">
-        {props.imageIndex + 1} / {props.imageTotal}
-      </span>
-      <Button size="sm" variant="ghost" onClick={props.onNext} title="Next image (D)">Next ›</Button>
+      {/* Edit */}
+      <span className={groupLabel}>Edit</span>
+      <button className={iconBtn()} onClick={props.onUndo} disabled={!props.canUndo} title="Undo (Ctrl+Z)" style={{opacity: props.canUndo ? 1 : 0.35}}>
+        <svg width="15" height="15" viewBox="0 0 15 15" fill="none"><path d="M4 4H9.5a3.5 3.5 0 0 1 0 7H5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/><path d="M6.5 2L4 4l2.5 2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></svg>
+      </button>
+      <button className={iconBtn()} onClick={props.onRedo} disabled={!props.canRedo} title="Redo (Ctrl+Y)" style={{opacity: props.canRedo ? 1 : 0.35}}>
+        <svg width="15" height="15" viewBox="0 0 15 15" fill="none"><path d="M11 4H5.5a3.5 3.5 0 0 0 0 7H10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/><path d="M8.5 2L11 4l-2.5 2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></svg>
+      </button>
+      <div className={vSep} />
 
-      <div className="w-px h-5 bg-slate-700" />
+      {/* Navigation */}
+      <button className={iconBtn()} onClick={props.onPrev} title="Previous Image (A / ←)">
+        <svg width="10" height="12" viewBox="0 0 10 12" fill="currentColor"><path d="M9 1L1 6l8 5V1z"/></svg>
+      </button>
+      <button className={iconBtn()} onClick={props.onNext} title="Next Image (D / →)">
+        <svg width="10" height="12" viewBox="0 0 10 12" fill="currentColor"><path d="M1 1l8 5-8 5V1z"/></svg>
+      </button>
 
-      <Button size="sm" variant="ghost" onClick={props.onCopyPrev} title="Copy boxes from previous image (C)">Copy prev</Button>
+      {/* Copy prev */}
+      <button
+        className={`${iconBtn()} !w-auto px-2 text-[11px] shrink-0`}
+        onClick={props.onCopyPrev}
+        title="Copy boxes from previous image (C)"
+      >Copy prev</button>
 
-      <div className="flex-1" />
+      <div className="flex-1 shrink-0 min-w-2" />
 
-      <Button size="sm" variant="ghost" onClick={props.onExport}>Export</Button>
-      <Button size="sm" variant="ghost" onClick={props.onTrain}>Train</Button>
-      <Button size="sm" variant="primary" onClick={props.onSave} disabled={props.saving}>
-        {props.saving ? 'Saving…' : 'Save'}
-      </Button>
+      {/* Save */}
+      <button
+        className={`${iconBtn()} !w-[42px]`}
+        onClick={props.onSave}
+        disabled={props.saving}
+        title="Save Project (Ctrl+S)"
+      >{props.saving ? '…' : '💾'}</button>
+
+      {/* Action buttons */}
+      <button className={actionBtn('bg-violet-700 hover:bg-violet-600')} onClick={props.onExport} title="Export Dataset">⬆ Export</button>
+      <button className={actionBtn('bg-amber-700 hover:bg-amber-600')} onClick={props.onTrain} title="Train YOLO Model">▶ Train</button>
+      <button className={actionBtn('bg-cyan-700 hover:bg-cyan-600')} onClick={props.onDetect} title="Service Manager">⚡ Service Manager</button>
     </div>
   )
 }
