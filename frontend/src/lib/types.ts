@@ -65,6 +65,13 @@ export interface ServiceConfig {
   dataset_capture: boolean
   dataset_interval: number
   dataset_dir: string
+  // TCP push
+  tcp_push_enabled: boolean
+  tcp_push_host: string
+  tcp_push_port: number
+  tcp_push_certfile: string
+  tcp_push_keyfile: string
+  tcp_push_ca_certs: string
 }
 
 export interface ServiceStatus {
@@ -76,6 +83,7 @@ export interface ServiceStatus {
   is_previewing: boolean
   is_direction_debugging: boolean
   is_dataset_capturing: boolean
+  tcp_push_running: boolean
   last_payload: {
     car?: { detected: boolean; direction: string; confidence: number }
     car_rear?: { detected: boolean; direction: string; confidence: number }

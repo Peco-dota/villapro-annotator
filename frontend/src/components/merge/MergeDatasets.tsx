@@ -6,6 +6,8 @@ import { PathInput } from '../ui/PathInput'
 import { FilePicker } from '../ui/FilePicker'
 import { Spinner } from '../ui/Spinner'
 import { useJobPoller } from '../../lib/useJobPoller'
+import { AugmentSettings, augmentConfigToPayload, DEFAULT_AUGMENT } from '../augment/AugmentSettings'
+import type { AugmentConfig } from '../augment/AugmentSettings'
 
 interface ProjectEntry {
   path: string
@@ -41,16 +43,7 @@ export function MergeDatasets() {
 
   // Augmentation
   const [doAug, setDoAug] = useState(false)
-  const [copies, setCopies] = useState(2)
-  const [flipH, setFlipH] = useState(true)
-  const [flipV, setFlipV] = useState(false)
-  const [brightness, setBrightness] = useState(true)
-  const [contrast, setContrast] = useState(true)
-  const [saturation, setSaturation] = useState(true)
-  const [rotation, setRotation] = useState(false)
-  const [rotDeg, setRotDeg] = useState(15)
-  const [onlyAnnotated, setOnlyAnnotated] = useState(true)
-  const [includeOriginals, setIncludeOriginals] = useState(true)
+  const [augConfig, setAugConfig] = useState<AugmentConfig>(DEFAULT_AUGMENT)
 
   // Job
   const [jobId, setJobId] = useState<string | null>(null)
@@ -71,25 +64,7 @@ export function MergeDatasets() {
     test: testPct / 100,
   } : undefined
 
-  const augmentation = doAug ? {
-    flip_horizontal: flipH,
-    flip_vertical: flipV,
-    brightness,
-    brightness_range: [0.6, 1.4],
-    contrast,
-    contrast_range: [0.6, 1.4],
-    saturation,
-    saturation_range: [0.5, 1.5],
-    rotation,
-    rotation_degrees: rotDeg,
-    copies_per_image: copies,
-    only_annotated: onlyAnnotated,
-    output_original: includeOriginals,
-    blur: false,
-    blur_radius: 1.5,
-    noise: false,
-    noise_std: 15,
-  } : null
+  const augmentation = doAug ? augmentConfigToPayload(augConfig) : null
 
   const mergeMut = useMutation({
     mutationFn: () => exportBatch({
@@ -210,48 +185,11 @@ export function MergeDatasets() {
         <Toggle label="Enable augmentation" checked={doAug} onChange={setDoAug} />
 
         {doAug && (
-          <div className="flex flex-col gap-3 pl-3 border-l-2 border-slate-700 mt-1">
-            {/* Copies */}
-            <div className="flex items-center gap-3">
-              <label className="text-sm text-slate-400 w-32 shrink-0">Copies per image</label>
-              <input
-                type="number" min={1} max={10} value={copies}
-                onChange={e => setCopies(Math.max(1, Math.min(10, +e.target.value)))}
-                className="w-20 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-sm text-slate-100 focus:outline-none focus:border-violet-500"
-              />
-            </div>
-
-            {/* Flips */}
-            <div className="flex gap-6">
-              <Toggle label="Flip horizontal" checked={flipH} onChange={setFlipH} />
-              <Toggle label="Flip vertical" checked={flipV} onChange={setFlipV} />
-            </div>
-
-            {/* Color */}
-            <div className="flex gap-6">
-              <Toggle label="Brightness" checked={brightness} onChange={setBrightness} />
-              <Toggle label="Contrast" checked={contrast} onChange={setContrast} />
-              <Toggle label="Saturation" checked={saturation} onChange={setSaturation} />
-            </div>
-
-            {/* Rotation */}
-            <div className="flex items-center gap-3">
-              <Toggle label="Rotation ±" checked={rotation} onChange={setRotation} />
-              <input
-                type="number" min={1} max={45} value={rotDeg}
-                onChange={e => setRotDeg(+e.target.value)}
-                disabled={!rotation}
-                className="w-16 bg-slate-800 border border-slate-600 rounded px-2 py-0.5 text-xs text-slate-100
-                  focus:outline-none focus:border-violet-500 disabled:opacity-30"
-              />
-              <span className="text-xs text-slate-500">°</span>
-            </div>
-
-            {/* Output opts */}
-            <div className="flex flex-col gap-1.5">
-              <Toggle label="Only augment annotated images" checked={onlyAnnotated} onChange={setOnlyAnnotated} />
-              <Toggle label="Include originals in output" checked={includeOriginals} onChange={setIncludeOriginals} />
-            </div>
+          <div className="mt-2">
+            <AugmentSettings
+              value={augConfig}
+              onChange={patch => setAugConfig(prev => ({ ...prev, ...patch }))}
+            />
           </div>
         )}
       </div>

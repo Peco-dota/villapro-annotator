@@ -1,14 +1,144 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getSystemInfo, getTokens, createToken, revokeToken, getSettings, patchSettings } from '../lib/api'
-import { clearToken } from '../lib/auth'
+import {
+  getSystemInfo, getSettings, patchSettings, changePassword,
+  getTokens, createToken, revokeToken,
+} from '../lib/api'
+import { clearToken, getUser } from '../lib/auth'
 import { Button } from '../components/ui/Button'
 import { Input } from '../components/ui/Input'
 import { Spinner } from '../components/ui/Spinner'
 import type { Token } from '../lib/types'
 
-function TokenSection() {
+// ── Section wrapper ───────────────────────────────────────────────────────────
+
+function Section({ title, icon, children }: { title: string; icon: string; children: React.ReactNode }) {
+  return (
+    <div className="bg-[#16213e] border border-[#1e293b] rounded-xl overflow-hidden">
+      <div className="flex items-center gap-3 px-5 py-4 border-b border-[#1e293b]">
+        <span className="text-base">{icon}</span>
+        <h2 className="text-sm font-semibold text-slate-100">{title}</h2>
+      </div>
+      <div className="p-5">{children}</div>
+    </div>
+  )
+}
+
+// ── Change password ───────────────────────────────────────────────────────────
+
+function ChangePasswordSection() {
+  const [form, setForm] = useState({ current: '', next: '', confirm: '' })
+  const [err, setErr] = useState('')
+  const [ok, setOk] = useState(false)
+
+  const mut = useMutation({
+    mutationFn: () => changePassword(form.current, form.next),
+    onSuccess: () => {
+      setOk(true)
+      setErr('')
+      setForm({ current: '', next: '', confirm: '' })
+      setTimeout(() => setOk(false), 3000)
+    },
+    onError: (e: unknown) => {
+      setErr((e as { response?: { data?: { detail?: string } } }).response?.data?.detail ?? 'Failed to change password.')
+    },
+  })
+
+  const canSubmit = form.current && form.next.length >= 6 && form.next === form.confirm
+
+  return (
+    <Section title="Change Password" icon="🔑">
+      <div className="flex flex-col gap-3 max-w-sm">
+        <Input
+          label="Current password"
+          type="password"
+          value={form.current}
+          onChange={e => setForm(f => ({ ...f, current: e.target.value }))}
+          autoComplete="current-password"
+        />
+        <Input
+          label="New password"
+          type="password"
+          value={form.next}
+          onChange={e => setForm(f => ({ ...f, next: e.target.value }))}
+          autoComplete="new-password"
+        />
+        <Input
+          label="Confirm new password"
+          type="password"
+          value={form.confirm}
+          onChange={e => setForm(f => ({ ...f, confirm: e.target.value }))}
+          autoComplete="new-password"
+          onKeyDown={e => { if (e.key === 'Enter' && canSubmit) mut.mutate() }}
+        />
+        {form.next && form.confirm && form.next !== form.confirm && (
+          <p className="text-xs text-red-400">Passwords don't match</p>
+        )}
+        {form.next && form.next.length < 6 && (
+          <p className="text-xs text-slate-500">At least 6 characters required</p>
+        )}
+        {err && <p className="text-xs text-red-400">{err}</p>}
+        {ok && <p className="text-xs text-green-400">Password changed successfully.</p>}
+        <div className="pt-1">
+          <Button variant="primary" onClick={() => mut.mutate()} disabled={mut.isPending || !canSubmit}>
+            {mut.isPending ? <Spinner size={12} /> : null}
+            Change Password
+          </Button>
+        </div>
+      </div>
+    </Section>
+  )
+}
+
+// ── Server settings ───────────────────────────────────────────────────────────
+
+function ServerSettingsSection() {
+  const { data: settings, isLoading } = useQuery({ queryKey: ['settings'], queryFn: getSettings })
+  const qc = useQueryClient()
+  const [form, setForm] = useState<Record<string, unknown>>({})
+  const [saved, setSaved] = useState(false)
+
+  const mut = useMutation({
+    mutationFn: () => patchSettings(form),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['settings'] })
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2500)
+    },
+  })
+
+  const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement>) =>
+    setForm(f => ({ ...f, [k]: e.target.type === 'number' ? +e.target.value : e.target.value }))
+
+  if (isLoading) return <Section title="Server Settings" icon="⚙"><Spinner /></Section>
+
+  return (
+    <Section title="Server Settings" icon="⚙">
+      <div className="flex flex-col gap-3 max-w-sm">
+        <Input label="Host" defaultValue={settings?.host} onChange={set('host')} />
+        <Input label="Port" type="number" defaultValue={settings?.port} onChange={set('port')} />
+        <Input label="SSL cert file" defaultValue={settings?.ssl_certfile ?? ''} onChange={set('ssl_certfile')} placeholder="(optional)" />
+        <Input label="SSL key file" defaultValue={settings?.ssl_keyfile ?? ''} onChange={set('ssl_keyfile')} placeholder="(optional)" />
+        <div className="flex items-center gap-3 pt-1">
+          <Button
+            variant="primary"
+            onClick={() => mut.mutate()}
+            disabled={mut.isPending || Object.keys(form).length === 0}
+          >
+            {mut.isPending ? <Spinner size={12} /> : null}
+            Save Settings
+          </Button>
+          {saved && <span className="text-xs text-green-400">Saved!</span>}
+        </div>
+      </div>
+    </Section>
+  )
+}
+
+// ── API tokens ────────────────────────────────────────────────────────────────
+
+function ApiTokensSection() {
   const qc = useQueryClient()
   const [label, setLabel] = useState('')
   const [newToken, setNewToken] = useState<string | null>(null)
@@ -29,18 +159,15 @@ function TokenSection() {
   })
 
   return (
-    <section className="bg-slate-900 border border-slate-700 rounded-xl p-5">
-      <h2 className="text-sm font-semibold text-slate-100 mb-4">API Tokens</h2>
-
+    <Section title="API Tokens" icon="🔐">
       {newToken && (
-        <div className="mb-4 p-3 bg-green-900/20 border border-green-700 rounded-lg">
-          <p className="text-xs text-green-400 mb-1 font-medium">Token created — copy it now, it won't be shown again:</p>
-          <code className="text-xs text-green-200 break-all">{newToken}</code>
+        <div className="mb-4 px-4 py-3 bg-green-900/20 border border-green-700/50 rounded-lg">
+          <p className="text-xs text-green-400 mb-1.5 font-medium">Token created — copy it now, it won't be shown again:</p>
+          <code className="text-xs text-green-200 break-all font-mono">{newToken}</code>
           <button onClick={() => setNewToken(null)} className="block text-xs text-slate-500 mt-2 cursor-pointer hover:text-slate-300">Dismiss</button>
         </div>
       )}
-
-      <div className="flex gap-2 mb-4">
+      <div className="flex gap-2 mb-4 max-w-sm">
         <Input
           className="flex-1"
           placeholder="Token label (e.g. frontend-prod)"
@@ -54,14 +181,15 @@ function TokenSection() {
         </Button>
       </div>
 
-      {isLoading ? <Spinner /> : (
+      {isLoading ? <Spinner /> : tokens.length === 0 ? (
+        <p className="text-xs text-slate-600">No tokens yet</p>
+      ) : (
         <div className="flex flex-col gap-2">
-          {tokens.length === 0 && <p className="text-xs text-slate-600">No tokens yet</p>}
-          {tokens.map((t) => (
-            <div key={t.token} className="flex items-center justify-between gap-3 px-3 py-2 bg-slate-800 rounded-lg">
+          {tokens.map(t => (
+            <div key={t.token} className="flex items-center justify-between gap-3 px-4 py-2.5 bg-[#0f172a] border border-[#1e293b] rounded-lg">
               <div>
                 <p className="text-sm text-slate-200">{t.label}</p>
-                <p className="text-xs text-slate-600">{new Date(t.created_at).toLocaleString()}</p>
+                <p className="text-xs text-slate-600 mt-0.5">{new Date(t.created_at).toLocaleString()}</p>
               </div>
               <Button
                 variant="danger"
@@ -72,72 +200,77 @@ function TokenSection() {
           ))}
         </div>
       )}
-    </section>
+    </Section>
   )
 }
 
-function ServerSettings() {
-  const { data: settings, isLoading } = useQuery({
-    queryKey: ['settings'],
-    queryFn: getSettings,
-  })
-  const qc = useQueryClient()
-  const [form, setForm] = useState<Record<string, unknown>>({})
-  const [saved, setSaved] = useState(false)
-
-  const mut = useMutation({
-    mutationFn: () => patchSettings(form),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['settings'] }); setSaved(true); setTimeout(() => setSaved(false), 2000) },
-  })
-
-  if (isLoading) return <Spinner />
-
-  const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement>) =>
-    setForm(f => ({ ...f, [k]: e.target.type === 'number' ? +e.target.value : e.target.value }))
-
-  return (
-    <section className="bg-slate-900 border border-slate-700 rounded-xl p-5">
-      <h2 className="text-sm font-semibold text-slate-100 mb-4">Server Settings</h2>
-      <div className="flex flex-col gap-3">
-        <Input label="Host" defaultValue={settings?.host} onChange={set('host')} />
-        <Input label="Port" type="number" defaultValue={settings?.port} onChange={set('port')} />
-        <Input label="SSL cert file" defaultValue={settings?.ssl_certfile ?? ''} onChange={set('ssl_certfile')} placeholder="(optional)" />
-        <Input label="SSL key file" defaultValue={settings?.ssl_keyfile ?? ''} onChange={set('ssl_keyfile')} placeholder="(optional)" />
-        <div className="flex justify-end gap-2 pt-1">
-          {saved && <span className="text-xs text-green-400 self-center">Saved!</span>}
-          <Button variant="primary" onClick={() => mut.mutate()} disabled={mut.isPending || Object.keys(form).length === 0}>
-            {mut.isPending ? <Spinner size={12} /> : null}
-            Save Settings
-          </Button>
-        </div>
-      </div>
-    </section>
-  )
-}
+// ── Page ──────────────────────────────────────────────────────────────────────
 
 export function SettingsPage() {
   const nav = useNavigate()
+  const user = getUser()
   const { data: info } = useQuery({ queryKey: ['sysinfo'], queryFn: getSystemInfo })
-
   const logout = () => { clearToken(); nav('/login') }
 
   return (
-    <div className="min-h-screen bg-[#0f0d14] p-6">
-      <header className="flex items-center justify-between mb-8 max-w-2xl mx-auto">
+    <div className="min-h-screen bg-[#0f172a] flex flex-col">
+      {/* Top bar — matches WelcomePage */}
+      <header className="flex items-center justify-between px-6 py-3 border-b border-[#1e293b] shrink-0">
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="sm" onClick={() => nav('/')}>← Back</Button>
-          <h1 className="text-xl font-semibold text-slate-100">Settings</h1>
+          <div className="w-8 h-8 rounded-lg bg-violet-600/20 border border-violet-500/30 flex items-center justify-center">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" strokeWidth="1.5">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
+          </div>
+          <span className="text-base font-semibold text-slate-100">VisionQ</span>
+          {info && <span className="text-xs text-slate-600">v{info.version}</span>}
         </div>
-        <div className="flex items-center gap-3">
-          {info && <span className="text-xs text-slate-600">VisionQ v{info.version} · {info.platform}</span>}
-          <Button variant="danger" size="sm" onClick={logout}>Log out</Button>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-slate-500">{user?.username}</span>
+          <Button variant="ghost" size="sm" onClick={() => nav('/')}>← Back</Button>
+          <Button variant="ghost" size="sm" onClick={logout}>Sign out</Button>
         </div>
       </header>
 
-      <main className="max-w-2xl mx-auto flex flex-col gap-5">
-        <TokenSection />
-        <ServerSettings />
-      </main>
+      <div className="flex flex-1 overflow-hidden">
+        {/* Left nav */}
+        <aside className="w-56 border-r border-[#1e293b] p-4 shrink-0">
+          <p className="text-[10px] font-bold text-slate-600 uppercase tracking-widest px-1 mb-3">Settings</p>
+          <nav className="flex flex-col gap-1">
+            {[
+              { label: 'Account', icon: '👤' },
+              { label: 'Server', icon: '⚙' },
+              { label: 'API Tokens', icon: '🔐' },
+            ].map(item => (
+              <a
+                key={item.label}
+                href={`#${item.label.toLowerCase().replace(' ', '-')}`}
+                className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-slate-400 hover:text-slate-200 hover:bg-[#1e293b] transition-colors"
+              >
+                <span>{item.icon}</span>
+                {item.label}
+              </a>
+            ))}
+          </nav>
+
+          {info && (
+            <div className="mt-auto pt-4 border-t border-[#1e293b] mt-8">
+              <p className="text-[10px] text-slate-600 px-1">VisionQ v{info.version}</p>
+              <p className="text-[10px] text-slate-700 px-1">{info.platform}</p>
+            </div>
+          )}
+        </aside>
+
+        {/* Content */}
+        <main className="flex-1 overflow-y-auto p-6">
+          <div className="max-w-xl flex flex-col gap-5">
+            <div id="account"><ChangePasswordSection /></div>
+            <div id="server"><ServerSettingsSection /></div>
+            <div id="api-tokens"><ApiTokensSection /></div>
+          </div>
+        </main>
+      </div>
     </div>
   )
 }

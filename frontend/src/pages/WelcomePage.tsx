@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getRecentProjects, openProject, createProject, getSystemInfo, removeRecentProject } from '../lib/api'
+import { getRecentProjects, openProject, createProject, getSystemInfo, removeRecentProject, getActiveTrain } from '../lib/api'
 import { getUser, clearToken } from '../lib/auth'
 import { Button } from '../components/ui/Button'
 import { Modal } from '../components/ui/Modal'
@@ -286,13 +286,14 @@ function AnnotateSection() {
 // ── Nav tile ──────────────────────────────────────────────────────────────────
 
 function NavTile({
-  icon, label, description, onClick, active,
+  icon, label, description, onClick, active, badge,
 }: {
   icon: React.ReactNode
   label: string
   description: string
   onClick: () => void
   active?: boolean
+  badge?: React.ReactNode
 }) {
   return (
     <button
@@ -306,8 +307,11 @@ function NavTile({
         ${active ? 'bg-violet-600/30' : 'bg-slate-800'}`}>
         {icon}
       </div>
-      <div className="min-w-0">
-        <p className={`font-semibold text-sm ${active ? 'text-violet-200' : 'text-slate-100'}`}>{label}</p>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <p className={`font-semibold text-sm ${active ? 'text-violet-200' : 'text-slate-100'}`}>{label}</p>
+          {badge}
+        </div>
         <p className="text-xs text-slate-500 mt-0.5">{description}</p>
       </div>
     </button>
@@ -368,6 +372,7 @@ export function WelcomePage() {
   const [activeSection, setActiveSection] = useState<Section>('annotate')
 
   const { data: info } = useQuery({ queryKey: ['sysinfo'], queryFn: getSystemInfo, retry: false })
+  const { data: trainActive } = useQuery({ queryKey: ['train-active'], queryFn: getActiveTrain, refetchInterval: 3000 })
 
   const logout = () => { clearToken(); nav('/login') }
 
@@ -421,9 +426,17 @@ export function WelcomePage() {
           <NavTile
             icon={<IconTrain />}
             label="Train Model"
-            description="Train YOLO from an annotated dataset"
+            description={trainActive?.active
+              ? `Epoch ${trainActive.epoch ?? 0}/${trainActive.total_epochs ?? '?'} — ${trainActive.run_name}`
+              : 'Train YOLO from an annotated dataset'}
             onClick={() => setActiveSection('train')}
             active={activeSection === 'train'}
+            badge={trainActive?.active ? (
+              <span className="flex items-center gap-1 text-[10px] font-bold text-violet-300 bg-violet-900/40 border border-violet-500/30 px-1.5 py-0.5 rounded-full">
+                <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse inline-block" />
+                TRAINING
+              </span>
+            ) : undefined}
           />
           <NavTile
             icon={<IconDetection />}

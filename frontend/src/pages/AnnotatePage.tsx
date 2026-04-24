@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   getProjectInfo, getProjectImages, getAnnotations,
-  replaceAnnotations, saveProject, copyFromPrev, getClasses,
+  replaceAnnotations, saveProject, copyFromPrev, getClasses, deleteImage,
 } from '../lib/api'
 import type { BoundingBox, ClassDef, ImageEntry, ProjectInfo } from '../lib/types'
 import { ImageList } from '../components/annotate/ImageList'
@@ -11,7 +11,6 @@ import { AnnotationCanvas } from '../components/annotate/AnnotationCanvas'
 import { ClassSidebar } from '../components/annotate/ClassSidebar'
 import { Toolbar } from '../components/annotate/Toolbar'
 import { ExportDialog } from '../components/annotate/ExportDialog'
-import { TrainDialog } from '../components/annotate/TrainDialog'
 import { Spinner } from '../components/ui/Spinner'
 
 const UNDO_LIMIT = 50
@@ -30,7 +29,6 @@ export function AnnotatePage() {
   const [undoStack, setUndoStack] = useState<BoundingBox[][]>([])
   const [redoStack, setRedoStack] = useState<BoundingBox[][]>([])
   const [exportOpen, setExportOpen] = useState(false)
-  const [trainOpen, setTrainOpen] = useState(false)
   const [dirty, setDirty] = useState(false)
   const [zoom, setZoom] = useState(1)
   const [fitScale, setFitScale] = useState(1)
@@ -83,6 +81,18 @@ export function AnnotatePage() {
       if (data.boxes.length > 0) {
         setTool('select')
         setSelectedBoxId(data.boxes[data.boxes.length - 1].id)
+      }
+    },
+  })
+
+  const deleteMut = useMutation({
+    mutationFn: (filename: string) => deleteImage(projectPath, filename),
+    onSuccess: (_data, filename) => {
+      qc.invalidateQueries({ queryKey: ['images', projectPath] })
+      if (currentFile === filename) {
+        const idx = images.findIndex(i => i.filename === filename)
+        const next = images[idx + 1] ?? images[idx - 1] ?? null
+        setCurrentFile(next?.filename ?? null)
       }
     },
   })
@@ -164,6 +174,7 @@ export function AnnotatePage() {
       if (e.key === 'r' || e.key === 'R') setTool('draw')
       if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') gotoImage('prev')
       if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') gotoImage('next')
+      if (e.key === ' ') { e.preventDefault(); gotoImage('next') }
       if (e.key === '=' || e.key === '+') setZoom(z => Math.min(z * 1.2, 8))
       if (e.key === '-') setZoom(z => Math.max(z / 1.2, 0.1))
       if (e.key === 'f' || e.key === 'F') setZoom(1)
@@ -197,8 +208,6 @@ export function AnnotatePage() {
         onPrev={() => gotoImage('prev')}
         onNext={() => gotoImage('next')}
         onExport={() => setExportOpen(true)}
-        onTrain={() => setTrainOpen(true)}
-        onDetect={() => nav('/detection')}
         onGoHome={() => nav('/')}
         saving={saveMut.isPending}
         imageName={currentFile}
@@ -228,6 +237,7 @@ export function AnnotatePage() {
           current={currentFile}
           projectPath={projectPath}
           onSelect={f => { setCurrentFile(f); setSelectedBoxId(null) }}
+          onDelete={filename => deleteMut.mutate(filename)}
         />
 
         {/* Canvas */}
@@ -286,7 +296,6 @@ export function AnnotatePage() {
       </div>
 
       <ExportDialog open={exportOpen} onClose={() => setExportOpen(false)} projectPath={projectPath} />
-      <TrainDialog open={trainOpen} onClose={() => setTrainOpen(false)} />
     </div>
   )
 }

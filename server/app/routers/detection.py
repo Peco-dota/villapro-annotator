@@ -21,20 +21,21 @@ router = APIRouter(prefix="/api/detection", tags=["detection"])
 # SSE subscribers: service_name -> list of asyncio queues
 _sse_queues: dict[str, list[asyncio.Queue]] = {}
 _sse_lock = asyncio.Lock()
+_event_loop: asyncio.AbstractEventLoop | None = None
+
+
+@router.on_event("startup")
+async def _capture_loop():
+    """Capture the running event loop at startup so background threads can schedule onto it."""
+    global _event_loop
+    _event_loop = asyncio.get_running_loop()
 
 
 def _notify_sse(service_name: str, payload: dict):
-    """Called from detection service threads to fan-out to SSE subscribers.
-
-    This is safe to call from a background thread — we schedule the coroutine
-    onto the running event loop.
-    """
-    import asyncio as _asyncio
-    try:
-        loop = _asyncio.get_event_loop()
-    except RuntimeError:
+    """Called from detection service threads to fan-out to SSE subscribers."""
+    if _event_loop is None or _event_loop.is_closed():
         return
-    loop.call_soon_threadsafe(_do_notify, service_name, payload)
+    _event_loop.call_soon_threadsafe(_do_notify, service_name, payload)
 
 
 def _do_notify(service_name: str, payload: dict):
@@ -178,6 +179,8 @@ def delete_service(name: str, _user: dict = Depends(require_user)):
 @router.post("/services/{name}/start")
 def start_service(name: str, _user: dict = Depends(require_user)):
     reg = get_registry()
+    # Clear stale results from the previous run so the receiver shows a fresh feed
+    _result_buffer.pop(name, None)
 
     def _on_done(error: str):
         pass  # SSE subscribers will see state change on next poll
@@ -228,6 +231,7 @@ def get_service_status(name: str, _user: dict = Depends(require_user)):
         "is_previewing": svc.is_previewing if svc else False,
         "is_direction_debugging": svc.is_direction_debugging if svc else False,
         "is_dataset_capturing": svc.is_dataset_capturing if svc else False,
+        "tcp_push_running": get_tcp_registry().is_running(name),
         "last_payload": svc._last_payload if svc else {},
     }
 
@@ -274,11 +278,10 @@ def start_debug(name: str, path: Optional[str] = None,
         raise HTTPException(status_code=404, detail="Service not running.")
     if not path:
         import os as _os
-        _os.makedirs(_os.path.expanduser("~/VisionQ_debug"), exist_ok=True)
         from datetime import datetime
-        path = _os.path.expanduser(
-            f"~/VisionQ_debug/{name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        )
+        debug_dir = _os.path.expanduser(f"~/VisionQ_debug/{name}")
+        _os.makedirs(debug_dir, exist_ok=True)
+        path = _os.path.join(debug_dir, f"debug_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
     svc.start_direction_debug(path)
     return {"debug_path": path}
 
@@ -522,6 +525,13 @@ async def receive_result(request: Request):
 def get_all_results(_user: dict = Depends(require_user)):
     """Return last N results per service (from in-memory buffer)."""
     return _result_buffer
+
+
+@router.delete("/results/all")
+def clear_all_results(_user: dict = Depends(require_user)):
+    """Clear the in-memory result buffer for all services."""
+    _result_buffer.clear()
+    return {"cleared": True}
 
 
 # Simple in-memory result buffer (last 100 per service)

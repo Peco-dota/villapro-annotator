@@ -10,8 +10,6 @@ interface Props {
   onPrev: () => void
   onNext: () => void
   onExport: () => void
-  onTrain: () => void
-  onDetect: () => void
   saving: boolean
   imageName: string | null
   imageIndex: number
@@ -108,8 +106,6 @@ export function Toolbar(props: Props) {
 
       {/* Action buttons */}
       <button className={actionBtn('bg-violet-700 hover:bg-violet-600')} onClick={props.onExport} title="Export Dataset">⬆ Export</button>
-      <button className={actionBtn('bg-amber-700 hover:bg-amber-600')} onClick={props.onTrain} title="Train YOLO Model">▶ Train</button>
-      <button className={actionBtn('bg-cyan-700 hover:bg-cyan-600')} onClick={props.onDetect} title="Service Manager">⚡ Service Manager</button>
     </div>
   )
 }

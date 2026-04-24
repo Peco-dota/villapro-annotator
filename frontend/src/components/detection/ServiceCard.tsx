@@ -7,6 +7,7 @@ import {
   startDebug, stopDebug,
   startDataset, stopDataset,
   startPreview, stopPreview,
+  startTcpPush, stopTcpPush,
   getPreviewFrameUrl, getVideoState,
   videoPause, videoSpeed, videoSeek, videoStep,
   sseUrl, api,
@@ -120,14 +121,16 @@ interface ServiceResults {
   rearCount: number
 }
 
-function useServiceResults(name: string, enabled: boolean): ServiceResults {
+function useServiceResults(name: string, enabled: boolean, runKey: string): ServiceResults {
   const [data, setData] = useState<ServiceResults>({ results: [], lastSeen: 0, totalReports: 0, carCount: 0, rearCount: 0 })
   const esRef = useRef<EventSource | null>(null)
 
   useEffect(() => {
+    // Reset on every new run (runKey changes when service restarts)
+    setData({ results: [], lastSeen: 0, totalReports: 0, carCount: 0, rearCount: 0 })
     if (!enabled) return
 
-    // Load buffered results
+    // Load buffered results for this run (server clears buffer on start, so this is fresh)
     api.get('/api/detection/results/all').then(r => {
       const buf = r.data as Record<string, DetectionPayload[]>
       const results = buf[name] ?? []
@@ -162,8 +165,28 @@ function useServiceResults(name: string, enabled: boolean): ServiceResults {
       } catch { /* ignore */ }
     }
 
-    return () => { es.close(); esRef.current = null }
-  }, [name, enabled])
+    // Polling fallback — catches any SSE gaps
+    const pollId = setInterval(() => {
+      api.get('/api/detection/results/all').then(r => {
+        const buf = r.data as Record<string, DetectionPayload[]>
+        const results = buf[name] ?? []
+        if (!results.length) return
+        setData(prev => {
+          // Only update if buffer has results newer than what we have
+          if (results[0]?.timestamp === prev.results[0]?.timestamp) return prev
+          return {
+            results,
+            lastSeen: Date.now(),
+            totalReports: Math.max(prev.totalReports, results.length),
+            carCount: results.filter(r => r.car?.detected).length,
+            rearCount: results.filter(r => r.car_rear?.detected).length,
+          }
+        })
+      }).catch(() => {})
+    }, 2000)
+
+    return () => { es.close(); esRef.current = null; clearInterval(pollId) }
+  }, [name, enabled, runKey])
 
   return data
 }
@@ -182,7 +205,7 @@ function dirLabel(d: string | undefined, conf: number | undefined, detected: boo
   )
 }
 
-function InlinePreview({ service, onStop }: { service: ServiceConfig; onStop: () => void }) {
+function InlinePreview({ service, onStop, runKey }: { service: ServiceConfig; onStop: () => void; runKey: string }) {
   const [polledUrl, setPolledUrl] = useState('')
   const [displayedUrl, setDisplayedUrl] = useState('')
   const [fps, setFps] = useState(0)
@@ -230,12 +253,12 @@ function InlinePreview({ service, onStop }: { service: ServiceConfig; onStop: ()
   const paused = videoState?.paused ?? false
   const currentSpeed = videoState?.speed ?? 1
 
-  const receiverData = useServiceResults(service.name, true)
+  const receiverData = useServiceResults(service.name, true, runKey)
   const isLive = Date.now() - receiverData.lastSeen < 5000
   const lastDir = receiverData.results[0]?.car?.direction
 
   return (
-    <div className="border-t border-[#1e293b] bg-[#0a0f1e]">
+    <div className="border-t border-[#1e293b] bg-[#0a0f1e] rounded-b-xl overflow-hidden">
       <div className="flex" style={{ minHeight: 300 }}>
 
         {/* ── Left: video feed ── */}
@@ -247,9 +270,23 @@ function InlinePreview({ service, onStop }: { service: ServiceConfig; onStop: ()
               <span className="text-xs text-slate-400 font-medium">Live Preview</span>
               <span className="text-xs text-slate-600">{fps} fps</span>
             </div>
-            <button onClick={onStop} className="text-xs text-slate-600 hover:text-red-400 cursor-pointer transition-colors">
-              ✕ Close preview
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => window.open(`/preview?service=${encodeURIComponent(service.name)}&mode=${service.input_mode}`, '_blank')}
+                className="text-xs text-slate-600 hover:text-violet-400 cursor-pointer transition-colors flex items-center gap-1"
+                title="Open in new tab"
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                  <polyline points="15 3 21 3 21 9"/>
+                  <line x1="10" y1="14" x2="21" y2="3"/>
+                </svg>
+                New tab
+              </button>
+              <button onClick={onStop} className="text-xs text-slate-600 hover:text-red-400 cursor-pointer transition-colors">
+                ✕ Close
+              </button>
+            </div>
           </div>
 
           {/* Frame */}
@@ -341,7 +378,7 @@ function InlinePreview({ service, onStop }: { service: ServiceConfig; onStop: ()
             <table className="w-full text-xs">
               <thead className="sticky top-0 bg-[#0a0f1e]">
                 <tr className="border-b border-[#1e293b]">
-                  {['TIME', 'GATE', 'CAR', 'DIR', 'REAR', 'DIR'].map(h => (
+                  {['TIME', 'GATE', 'CAR', 'CAR DIR', 'REAR', 'REAR DIR'].map(h => (
                     <th key={h} className="px-2 py-1.5 text-left text-[10px] font-bold text-slate-600 uppercase tracking-wider">{h}</th>
                   ))}
                 </tr>
@@ -389,6 +426,7 @@ export function ServiceCard({ service, onEdit, onDuplicate }: Props) {
   const [showLog, setShowLog] = useState(false)
   const [moreOpen, setMoreOpen] = useState(false)
   const [showPanel, setShowPanel] = useState(false)
+  const [runKey, setRunKey] = useState('init')
   const spinner = useSpinner()
 
   const { data: status } = useQuery<ServiceStatus>({
@@ -407,17 +445,36 @@ export function ServiceCard({ service, onEdit, onDuplicate }: Props) {
   const inv    = () => qc.invalidateQueries({ queryKey: ['service-status', service.name] })
   const invAll = () => qc.invalidateQueries({ queryKey: ['services'] })
 
-  const startMut   = useMutation({ mutationFn: () => startService(service.name),   onSuccess: inv })
+  const startMut   = useMutation({ mutationFn: () => startService(service.name),   onSuccess: () => { inv(); setRunKey(Date.now().toString()) } })
   const stopMut    = useMutation({ mutationFn: () => stopService(service.name),    onSuccess: inv })
   const restartMut = useMutation({ mutationFn: () => restartService(service.name), onSuccess: inv })
   const delMut     = useMutation({ mutationFn: () => deleteService(service.name),  onSuccess: invAll })
 
   const recStartMut = useMutation({ mutationFn: () => startRecording(service.name), onSuccess: inv })
   const recStopMut  = useMutation({ mutationFn: () => stopRecording(service.name),  onSuccess: inv })
-  const dbgStartMut = useMutation({ mutationFn: () => startDebug(service.name),     onSuccess: inv })
-  const dbgStopMut  = useMutation({ mutationFn: () => stopDebug(service.name),      onSuccess: inv })
+  const [dbgNotice, setDbgNotice] = useState<{ path: string; saved: boolean } | null>(null)
+  const dbgStartMut = useMutation({
+    mutationFn: () => startDebug(service.name),
+    onSuccess: (data: { debug_path: string }) => { inv(); setDbgNotice({ path: data.debug_path, saved: false }) },
+  })
+  const dbgStopMut  = useMutation({
+    mutationFn: () => stopDebug(service.name),
+    onSuccess: (data: { debug_path: string }) => { inv(); setDbgNotice({ path: data.debug_path, saved: true }) },
+  })
   const dsStartMut  = useMutation({ mutationFn: () => startDataset(service.name),   onSuccess: inv })
   const dsStopMut   = useMutation({ mutationFn: () => stopDataset(service.name),    onSuccess: inv })
+
+  const tcpStartMut = useMutation({
+    mutationFn: () => startTcpPush(service.name, {
+      host: service.tcp_push_host,
+      port: service.tcp_push_port,
+      certfile: service.tcp_push_certfile || '',
+      keyfile: service.tcp_push_keyfile || '',
+      ca_certs: service.tcp_push_ca_certs || '',
+    }),
+    onSuccess: inv,
+  })
+  const tcpStopMut  = useMutation({ mutationFn: () => stopTcpPush(service.name), onSuccess: inv })
 
   const prvStartMut = useMutation({
     mutationFn: () => startPreview(service.name),
@@ -442,6 +499,12 @@ export function ServiceCard({ service, onEdit, onDuplicate }: Props) {
   const isDbg  = status?.is_direction_debugging ?? false
   const isDs   = status?.is_dataset_capturing ?? false
   const isPrev = status?.is_previewing ?? false
+  const isTcp  = status?.tcp_push_running ?? false
+
+  // Keep showPanel in sync with server state — if server says preview is on, show the panel
+  useEffect(() => {
+    if (isPrev) setShowPanel(true)
+  }, [isPrev])
 
   const isRtspOrVideo = service.input_mode === 'rtsp' || service.input_mode === 'video'
 
@@ -461,7 +524,7 @@ export function ServiceCard({ service, onEdit, onDuplicate }: Props) {
   }
 
   return (
-    <div className="bg-[#16213e] border border-[#1e293b] rounded-xl overflow-hidden">
+    <div className="bg-[#16213e] border border-[#1e293b] rounded-xl">
 
       {/* ── Main row ── */}
       <div className="flex items-center gap-3 px-4 py-3">
@@ -477,6 +540,7 @@ export function ServiceCard({ service, onEdit, onDuplicate }: Props) {
           <span className="text-slate-600 shrink-0 ml-1">[{service.model_path?.split('/').pop()}]</span>
           {service.auto_start && <span className="text-slate-600 shrink-0" title="Auto-start">⟳</span>}
           {isRec && <span className="text-red-400 shrink-0" title="Recording">🎥</span>}
+          {isTcp && <span className="text-orange-400 text-xs font-mono shrink-0" title={`TCP push active on port ${service.tcp_push_port}`}>TCP:{service.tcp_push_port}</span>}
         </div>
 
         {(running || loading) && car && (
@@ -513,8 +577,8 @@ export function ServiceCard({ service, onEdit, onDuplicate }: Props) {
             <Btn
               color={isRec ? 'bg-red-900 border border-red-700 text-red-300 hover:bg-red-800' : 'bg-[#1e293b] text-slate-300 hover:bg-slate-700'}
               onClick={() => isRec ? recStopMut.mutate() : recStartMut.mutate()}
-              disabled={isRec ? recStopMut.isPending : recStartMut.isPending}
-              title="Toggle input stream recording"
+              disabled={(!isRec && !service.record_dir) || (isRec ? recStopMut.isPending : recStartMut.isPending)}
+              title={!isRec && !service.record_dir ? 'Set a recording directory in the service config first' : 'Toggle input stream recording'}
             >
               {isRec ? '■  Rec Off' : '●  Rec'}
             </Btn>
@@ -541,10 +605,21 @@ export function ServiceCard({ service, onEdit, onDuplicate }: Props) {
           <Btn
             color={isDs ? 'bg-teal-900 border border-teal-700 text-teal-300 hover:bg-teal-800' : 'bg-[#1e293b] text-slate-300 hover:bg-slate-700'}
             onClick={() => isDs ? dsStopMut.mutate() : dsStartMut.mutate()}
-            disabled={isDs ? dsStopMut.isPending : dsStartMut.isPending}
-            title="Capture frames to dataset folder"
+            disabled={(!isDs && !service.dataset_dir) || (isDs ? dsStopMut.isPending : dsStartMut.isPending)}
+            title={!isDs && !service.dataset_dir ? 'Set a dataset directory in the service config first' : 'Capture frames to dataset folder'}
           >
             {isDs ? '■  Dataset' : '⏺  Dataset'}
+          </Btn>
+        )}
+
+        {service.tcp_push_enabled && (
+          <Btn
+            color={isTcp ? 'bg-orange-900 border border-orange-700 text-orange-300 hover:bg-orange-800' : 'bg-[#1e293b] text-slate-300 hover:bg-slate-700'}
+            onClick={() => isTcp ? tcpStopMut.mutate() : tcpStartMut.mutate()}
+            disabled={isTcp ? tcpStopMut.isPending : tcpStartMut.isPending}
+            title={isTcp ? `TCP push running on port ${service.tcp_push_port}` : `Start TCP push on port ${service.tcp_push_port}`}
+          >
+            {isTcp ? `■  TCP :${service.tcp_push_port}` : `⏺  TCP :${service.tcp_push_port}`}
           </Btn>
         )}
 
@@ -585,6 +660,17 @@ export function ServiceCard({ service, onEdit, onDuplicate }: Props) {
         <div className="px-4 pb-2 text-xs text-red-400 font-mono">{status.error}</div>
       )}
 
+      {/* ── Debug notice ── */}
+      {dbgNotice && (
+        <div className="mx-4 mb-2 flex items-center justify-between gap-2 px-3 py-2 bg-green-900/20 border border-green-700/40 rounded-lg text-xs text-green-300">
+          <span>
+            {dbgNotice.saved ? '✓ Debug log saved to: ' : '⏺ Debug log writing to: '}
+            <span className="font-mono text-green-200">{dbgNotice.path}</span>
+          </span>
+          <button onClick={() => setDbgNotice(null)} className="text-green-600 hover:text-green-300 shrink-0 cursor-pointer">×</button>
+        </div>
+      )}
+
       {/* ── Log ── */}
       {showLog && (
         <div className="border-t border-[#1e293b]">
@@ -601,8 +687,8 @@ export function ServiceCard({ service, onEdit, onDuplicate }: Props) {
       )}
 
       {/* ── Inline preview + receiver panel ── */}
-      {showPanel && isPrev && (
-        <InlinePreview service={service} onStop={handlePanelClose} />
+      {isPrev && (
+        <InlinePreview service={service} onStop={handlePanelClose} runKey={runKey} />
       )}
     </div>
   )

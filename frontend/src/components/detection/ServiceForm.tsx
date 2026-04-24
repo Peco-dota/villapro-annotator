@@ -39,6 +39,12 @@ const defaults: Omit<ServiceConfig, 'name'> = {
   dataset_capture: false,
   dataset_interval: 10,
   dataset_dir: '',
+  tcp_push_enabled: false,
+  tcp_push_host: '0.0.0.0',
+  tcp_push_port: 9001,
+  tcp_push_certfile: '',
+  tcp_push_keyfile: '',
+  tcp_push_ca_certs: '',
 }
 
 function Section({ label }: { label: string }) {
@@ -230,6 +236,28 @@ export function ServiceForm({ open, onClose, existing }: Props) {
             value={form.record_dir} onChange={setVal('record_dir')}
             filter="dir" dirOnly={true} placeholder="Leave blank for default"
             pickerTitle="Select recording folder" />
+        )}
+
+        {/* ── TCP push ── */}
+        <Section label="TCP push" />
+        <Check
+          label="Enable TCP push server"
+          checked={form.tcp_push_enabled} onChange={setBool('tcp_push_enabled')}
+          hint="Other systems (gate controllers, alarm panels…) can connect and receive detection events as JSON lines over a raw TCP socket."
+        />
+        {form.tcp_push_enabled && (
+          <>
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="Listen host" value={form.tcp_push_host} onChange={set('tcp_push_host')} placeholder="0.0.0.0" />
+              <Input label="Port" type="number" min="1024" max="65535" value={form.tcp_push_port} onChange={set('tcp_push_port')} />
+            </div>
+            <p className="text-xs text-slate-600">
+              TLS — optional. Leave blank for plain TCP. If set, both cert and key are required.
+            </p>
+            <Input label="Certificate file (.pem) — optional" value={form.tcp_push_certfile} onChange={set('tcp_push_certfile')} placeholder="/etc/certs/server.crt" />
+            <Input label="Key file (.pem) — optional" value={form.tcp_push_keyfile} onChange={set('tcp_push_keyfile')} placeholder="/etc/certs/server.key" />
+            <Input label="CA certs (mTLS) — optional" value={form.tcp_push_ca_certs} onChange={set('tcp_push_ca_certs')} placeholder="/etc/certs/ca.crt" />
+          </>
         )}
 
         {/* ── Misc ── */}

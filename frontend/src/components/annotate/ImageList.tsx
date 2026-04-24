@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { ImageEntry } from '../../lib/types'
 import { getImageFile } from '../../lib/api'
 
@@ -6,9 +7,23 @@ interface Props {
   current: string | null
   projectPath: string
   onSelect: (filename: string) => void
+  onDelete: (filename: string) => void
 }
 
-export function ImageList({ images, current, projectPath, onSelect }: Props) {
+export function ImageList({ images, current, projectPath, onSelect, onDelete }: Props) {
+  const [hovering, setHovering] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState<string | null>(null)
+
+  const handleDelete = (e: React.MouseEvent, filename: string) => {
+    e.stopPropagation()
+    if (confirming === filename) {
+      onDelete(filename)
+      setConfirming(null)
+    } else {
+      setConfirming(filename)
+    }
+  }
+
   return (
     <div className="flex flex-col h-full bg-[#16213e] border-r border-[#1e293b]" style={{ width: 200, minWidth: 200 }}>
       <div
@@ -23,14 +38,18 @@ export function ImageList({ images, current, projectPath, onSelect }: Props) {
       <div className="flex-1 overflow-y-auto">
         {images.map((img, i) => {
           const active = img.filename === current
+          const isHovering = hovering === img.filename
+          const isConfirming = confirming === img.filename
           return (
-            <button
+            <div
               key={img.filename}
-              onClick={() => onSelect(img.filename)}
               style={{ height: 100 }}
-              className={`w-full flex items-center gap-2 px-1.5 py-1 text-left transition-colors cursor-pointer
+              className={`relative w-full flex items-center gap-2 px-1.5 py-1 cursor-pointer transition-colors
                 border-b border-[#0f172a]
                 ${active ? 'bg-[#1e1b4b] border border-violet-700/50' : 'hover:bg-[#1a2744] border border-transparent'}`}
+              onClick={() => { onSelect(img.filename); setConfirming(null) }}
+              onMouseEnter={() => setHovering(img.filename)}
+              onMouseLeave={() => { setHovering(null); setConfirming(null) }}
             >
               {/* Status bar */}
               <div
@@ -64,7 +83,23 @@ export function ImageList({ images, current, projectPath, onSelect }: Props) {
                   {img.box_count} box{img.box_count !== 1 ? 'es' : ''}
                 </span>
               </div>
-            </button>
+
+              {/* Delete button — appears on hover */}
+              {(isHovering || isConfirming) && (
+                <button
+                  onClick={e => handleDelete(e, img.filename)}
+                  title={isConfirming ? 'Click again to confirm delete' : 'Delete image'}
+                  className={`absolute top-1 right-1 w-5 h-5 flex items-center justify-center rounded text-[10px]
+                    transition-colors z-10
+                    ${isConfirming
+                      ? 'bg-red-600 text-white'
+                      : 'bg-[#0f172a]/80 text-slate-400 hover:bg-red-700 hover:text-white'
+                    }`}
+                >
+                  {isConfirming ? '!' : '×'}
+                </button>
+              )}
+            </div>
           )
         })}
       </div>

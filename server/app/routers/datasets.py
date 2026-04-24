@@ -18,15 +18,34 @@ from app.routers.projects import _get_project
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
 
 # Simple job tracker for long-running operations
-_jobs: dict[str, dict] = {}  # job_id -> {status, result, error}
+_jobs: dict[str, dict] = {}  # job_id -> {status, result, error, epoch, total_epochs}
 
 # Training log queues: job_id -> queue of log lines (None = sentinel/done)
 _train_logs: dict[str, queue.Queue] = {}
 
+# Cancel flags: job_id -> threading.Event (set = cancel requested)
+_train_cancel: dict[str, threading.Event] = {}
+
+# Training threads: job_id -> thread (so we can force-kill)
+_train_threads: dict[str, threading.Thread] = {}
+
+# Active training job (persisted so clients can reconnect after refresh)
+_active_train_job: dict = {}  # {job_id, run_name, epochs, started_at} or {}
+
+
+def _raise_in_thread(tid: int, exc_type: type) -> bool:
+    """Raise an exception in a thread by its OS id. Returns True on success."""
+    import ctypes
+    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+        ctypes.c_ulong(tid),
+        ctypes.py_object(exc_type),
+    )
+    return res == 1
+
 
 def _new_job() -> str:
     job_id = str(uuid.uuid4())
-    _jobs[job_id] = {"status": "running", "result": None, "error": None}
+    _jobs[job_id] = {"status": "running", "result": None, "error": None, "epoch": 0, "total_epochs": 0}
     return job_id
 
 
@@ -281,19 +300,70 @@ class TrainRequest(BaseModel):
     device: str = ""             # "cpu", "cuda", "mps", or "" for auto
 
 
+@router.get("/train/active")
+def get_active_train(_user: dict = Depends(require_user)):
+    """Return the currently running training job, if any."""
+    if not _active_train_job:
+        return {"active": False}
+    job_id = _active_train_job.get("job_id")
+    job = _jobs.get(job_id, {})
+    return {"active": True, **_active_train_job, **job}
+
+
+@router.post("/train/cancel")
+def cancel_train(force: bool = False, _user: dict = Depends(require_user)):
+    """Cancel the active training job.
+
+    force=false (default): set stop flag — training stops after the current epoch.
+    force=true: inject KeyboardInterrupt into the training thread immediately.
+    """
+    if not _active_train_job:
+        raise HTTPException(status_code=404, detail="No active training job.")
+    job_id = _active_train_job.get("job_id")
+
+    cancel_event = _train_cancel.get(job_id)
+    if cancel_event:
+        cancel_event.set()
+
+    if force:
+        thread = _train_threads.get(job_id)
+        if thread and thread.is_alive():
+            _raise_in_thread(thread.ident, KeyboardInterrupt)
+
+    return {"cancelled": job_id, "force": force}
+
+
 @router.post("/train")
 def train_endpoint(req: TrainRequest, background_tasks: BackgroundTasks,
                    _user: dict = Depends(require_user)):
     if not os.path.isfile(req.data_yaml):
         raise HTTPException(status_code=400, detail="data_yaml file not found.")
 
+    # Only one training job at a time
+    if _active_train_job and _jobs.get(_active_train_job.get("job_id", ""), {}).get("status") == "running":
+        raise HTTPException(status_code=409, detail="A training job is already running. Cancel it first.")
+
     run_name = req.run_name.strip() or "my_training"
     output_dir = MODELS_ROOT / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
     job_id = _new_job()
+    _jobs[job_id]["total_epochs"] = req.epochs
     log_q: queue.Queue = queue.Queue()
     _train_logs[job_id] = log_q
+    cancel_event = threading.Event()
+    _train_cancel[job_id] = cancel_event
+
+    import datetime
+    _active_train_job.clear()
+    _active_train_job.update({
+        "job_id": job_id,
+        "run_name": run_name,
+        "total_epochs": req.epochs,
+        "model": req.model,
+        "data_yaml": req.data_yaml,
+        "started_at": datetime.datetime.now().isoformat(),
+    })
 
     def _log(msg: str):
         log_q.put(msg)
@@ -302,7 +372,6 @@ def train_endpoint(req: TrainRequest, background_tasks: BackgroundTasks,
         try:
             from app.detection_service import _best_device
             from ultralytics import YOLO
-            import io, sys
 
             device = req.device or _best_device()
             _log(f"Model  : {req.model}")
@@ -317,6 +386,7 @@ def train_endpoint(req: TrainRequest, background_tasks: BackgroundTasks,
 
             def on_epoch_end(trainer):
                 ep = trainer.epoch + 1
+                _jobs[job_id]["epoch"] = ep
                 m = trainer.metrics or {}
                 try:
                     bl = trainer.loss_items[0].item()
@@ -324,16 +394,19 @@ def train_endpoint(req: TrainRequest, background_tasks: BackgroundTasks,
                     dfl = trainer.loss_items[2].item() if len(trainer.loss_items) > 2 else 0
                 except Exception:
                     bl = cl = dfl = 0
-                precision  = m.get("metrics/precision(B)", 0)
-                recall     = m.get("metrics/recall(B)", 0)
-                map50      = m.get("metrics/mAP50(B)", 0)
-                map5095    = m.get("metrics/mAP50-95(B)", 0)
+                precision = m.get("metrics/precision(B)", 0)
+                recall    = m.get("metrics/recall(B)", 0)
+                map50     = m.get("metrics/mAP50(B)", 0)
+                map5095   = m.get("metrics/mAP50-95(B)", 0)
                 _log(
                     f"[{ep:>3}/{total_epochs}]  "
                     f"loss: box={bl:.3f} cls={cl:.3f} dfl={dfl:.3f}  |  "
                     f"P={precision:.3f}  R={recall:.3f}  "
                     f"mAP50={map50:.3f}  mAP50-95={map5095:.3f}"
                 )
+                # Check cancel flag
+                if cancel_event.is_set():
+                    trainer.stop = True
 
             model.add_callback("on_train_epoch_end", on_epoch_end)
 
@@ -350,7 +423,13 @@ def train_endpoint(req: TrainRequest, background_tasks: BackgroundTasks,
                 verbose=False,
             )
 
-            # Locate best.pt
+            if cancel_event.is_set():
+                _log("─" * 52)
+                _log("Training cancelled by user.")
+                _job_failed(job_id, "Cancelled by user.")
+                _active_train_job.clear()
+                return
+
             best = output_dir / "weights" / "best.pt"
             if not best.exists():
                 for pt in output_dir.rglob("best.pt"):
@@ -366,15 +445,24 @@ def train_endpoint(req: TrainRequest, background_tasks: BackgroundTasks,
                 "output_dir": str(output_dir),
                 "device": device,
             })
+            _active_train_job.clear()
+        except KeyboardInterrupt:
+            _log("─" * 52)
+            _log("Training force-stopped.")
+            _job_failed(job_id, "Force-stopped by user.")
+            _active_train_job.clear()
         except Exception as e:
             import traceback
             _log(f"ERROR: {e}")
             _log(traceback.format_exc())
             _job_failed(job_id, str(e))
+            _active_train_job.clear()
         finally:
             log_q.put(None)  # sentinel
 
-    background_tasks.add_task(_run)
+    t = threading.Thread(target=_run, daemon=True)
+    _train_threads[job_id] = t
+    t.start()
     return {"job_id": job_id, "output_dir": str(output_dir)}
 
 

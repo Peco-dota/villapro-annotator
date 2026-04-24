@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { sseUrl, api } from '../../lib/api'
+import { sseUrl, api, clearAllResults } from '../../lib/api'
 
 interface DetectionPayload {
   service_name: string
@@ -40,6 +40,7 @@ function dirLabel(d: string | undefined, conf: number | undefined, detected: boo
 function ServicePanel({ data }: { data: ServiceResults }) {
   const isLive = Date.now() - data.lastSeen < 5000
   const lastDir = data.results[0]?.car?.direction
+  const hasResults = data.results.length > 0
 
   return (
     <div className="bg-[#16213e] border border-[#1e293b] rounded-xl overflow-hidden flex flex-col" style={{ minWidth: 480 }}>
@@ -47,11 +48,13 @@ function ServicePanel({ data }: { data: ServiceResults }) {
       <div className="flex items-center justify-between px-4 py-3 border-b border-[#1e293b]">
         <span className="text-sm font-bold text-violet-300">{data.name}</span>
         <div className="flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${isLive ? 'bg-green-400 animate-pulse' : 'bg-red-500'}`} />
+          <div className={`w-2 h-2 rounded-full ${isLive ? 'bg-green-400 animate-pulse' : 'bg-slate-600'}`} />
           <span className="text-xs text-slate-500">
             {isLive
               ? `Live · ${new Date(data.lastSeen).toLocaleTimeString()}`
-              : 'waiting…'}
+              : hasResults
+                ? `Last: ${new Date(data.lastSeen).toLocaleTimeString()}`
+                : 'no data'}
           </span>
         </div>
       </div>
@@ -181,14 +184,33 @@ export function ReceiverDashboard() {
     }
   }
 
-  // Also poll /results/all every 2s to pick up services that aren't subscribed yet
+  // Poll /results/all every 2s — discovers new services AND refreshes panel data
   useEffect(() => {
     const id = setInterval(() => {
       api.get('/api/detection/results/all').then(r => {
         const buf = r.data as Record<string, DetectionPayload[]>
-        for (const name of Object.keys(buf)) {
-          subscribeToService(name)
-        }
+        setPanels(prev => {
+          const next = { ...prev }
+          for (const [name, results] of Object.entries(buf)) {
+            if (!results.length) continue
+            subscribeToService(name)
+            const existing = next[name]
+            // Only update if the buffer has more/newer results than what SSE gave us
+            const bufNewer = !existing || results.length > existing.results.length ||
+              (results[0]?.timestamp && results[0].timestamp !== existing.results[0]?.timestamp)
+            if (bufNewer) {
+              next[name] = {
+                name,
+                results,
+                lastSeen: Date.now(),
+                totalReports: Math.max(existing?.totalReports ?? 0, results.length),
+                carCount: results.filter(r => r.car?.detected).length,
+                rearCount: results.filter(r => r.car_rear?.detected).length,
+              }
+            }
+          }
+          return next
+        })
       }).catch(() => {})
     }, 2000)
     return () => clearInterval(id)
@@ -221,7 +243,12 @@ export function ReceiverDashboard() {
           <span className="text-xs text-slate-500">{panelList.length} service{panelList.length !== 1 ? 's' : ''}</span>
           {panelList.length > 0 && (
             <button
-              onClick={() => { setPanels({}); for (const es of esRefs.current.values()) es.close(); esRefs.current.clear() }}
+              onClick={() => {
+                clearAllResults().catch(() => {})
+                setPanels({})
+                for (const es of esRefs.current.values()) es.close()
+                esRefs.current.clear()
+              }}
               className="text-xs text-slate-600 hover:text-red-400 cursor-pointer ml-2"
             >Clear all</button>
           )}

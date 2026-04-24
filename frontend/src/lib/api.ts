@@ -147,6 +147,13 @@ export const videoStep = (name: string) =>
   api.post(`/api/detection/services/${name}/video/step`).then(r => r.data)
 export const getVideoState = (name: string) =>
   api.get(`/api/detection/services/${name}/video/state`).then(r => r.data)
+export const clearAllResults = () =>
+  api.delete('/api/detection/results/all').then(r => r.data)
+// TCP push
+export const startTcpPush = (name: string, data: object) =>
+  api.post(`/api/detection/services/${name}/tcp/start`, data).then(r => r.data)
+export const stopTcpPush = (name: string) =>
+  api.post(`/api/detection/services/${name}/tcp/stop`).then(r => r.data)
 
 // ── Filesystem ───────────────────────────────────────────────────────────────
 export type FsFilter = 'any' | 'project' | 'images_dir' | 'model' | 'video' | 'yaml' | 'dir'
@@ -173,5 +180,7 @@ export const exportCoco = (data: object) => api.post('/api/datasets/export/coco'
 export const exportBatch = (data: object) => api.post('/api/datasets/export/batch', data).then(r => r.data)
 export const augmentProject = (data: object) => api.post('/api/datasets/augment/project', data).then(r => r.data)
 export const trainModel = (data: object) => api.post('/api/datasets/train', data).then(r => r.data)
+export const cancelTrain = (force = false) => api.post('/api/datasets/train/cancel', null, { params: { force } }).then(r => r.data)
+export const getActiveTrain = () => api.get('/api/datasets/train/active').then(r => r.data)
 export const trainLogUrl = (jobId: string): string => sseUrl(`/api/datasets/train/log/${jobId}`)
 export const getJob = (job_id: string) => api.get(`/api/datasets/jobs/${job_id}`).then(r => r.data)
