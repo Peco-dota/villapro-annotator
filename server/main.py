@@ -22,6 +22,8 @@ import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from app.config import init_config
 from app.version import VERSION
@@ -86,13 +88,30 @@ def create_app(config_path: str | None = None) -> FastAPI:
     app.include_router(datasets.router)
     app.include_router(fs.router)
 
-    @app.get("/")
-    def root():
-        return {
-            "name": "VisionQ Server",
-            "version": VERSION,
-            "docs": "/docs",
-        }
+    # Serve built React frontend if the dist folder exists (production / Docker)
+    _dist = os.path.join(os.path.dirname(__file__), "static")
+    if os.path.isdir(_dist):
+        app.mount("/assets", StaticFiles(directory=os.path.join(_dist, "assets")), name="assets")
+
+        @app.get("/")
+        def spa_root():
+            return FileResponse(os.path.join(_dist, "index.html"))
+
+        @app.get("/{full_path:path}")
+        def spa_fallback(full_path: str):
+            # API routes are handled by the routers above — only serve index.html for frontend routes
+            if full_path.startswith("api/") or full_path.startswith("docs") or full_path.startswith("redoc"):
+                from fastapi import HTTPException
+                raise HTTPException(status_code=404)
+            return FileResponse(os.path.join(_dist, "index.html"))
+    else:
+        @app.get("/")
+        def root():
+            return {
+                "name": "VisionQ Server",
+                "version": VERSION,
+                "docs": "/docs",
+            }
 
     return app
 

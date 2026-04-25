@@ -1,0 +1,22 @@
+# Python
+server/__pycache__/
+server/**/__pycache__/
+server/.venv/
+server/**/*.pyc
+server/**/*.pyo
+
+# Frontend build artifacts and deps — rebuilt inside Docker
+frontend/node_modules/
+frontend/dist/
+
+# Dev / OS
+.DS_Store
+*.log
+.env.local
+
+# Old app
+old_app/
+
+# Git
+.git/
+.gitignore

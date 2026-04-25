@@ -1,0 +1,29 @@
+services:
+  visionq:
+    build: .
+    image: visionq:latest
+    container_name: visionq
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+      # TCP push ports — add one per service you configure, e.g.:
+      # - "9001:9001"
+      # - "9002:9002"
+    volumes:
+      # All persistent data lives here — projects, models, exports, config, database
+      - visionq-data:/data
+      # Optional: mount a folder from the host so you can easily drop in videos/images
+      # - ~/villa-data:/villa-data
+    environment:
+      - VISIONQ_SECRET=change-me-in-production   # change this before deploying!
+    # GPU support — requires nvidia-container-toolkit on the host machine
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  visionq-data:
