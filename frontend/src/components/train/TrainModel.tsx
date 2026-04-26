@@ -131,7 +131,6 @@ export function TrainModel() {
   const [jobId, setJobId] = useState<string | null>(() => {
     try { return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null') } catch { return null }
   })
-  const [outputDir, setOutputDir] = useState('')
   const [logs, setLogs] = useState<string[]>([])
   const [logDone, setLogDone] = useState(false)
   const logRef = useRef<HTMLDivElement>(null)
@@ -212,7 +211,6 @@ export function TrainModel() {
     }),
     onSuccess: (data: { job_id: string; output_dir: string }) => {
       setJobId(data.job_id)
-      setOutputDir(data.output_dir)
       qc.invalidateQueries({ queryKey: ['train-active'] })
     },
   })
@@ -222,7 +220,6 @@ export function TrainModel() {
     setJobId(null)
     setLogs([])
     setLogDone(false)
-    setOutputDir('')
     mut.reset()
     qc.invalidateQueries({ queryKey: ['train-active'] })
   }

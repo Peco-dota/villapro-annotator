@@ -20,6 +20,7 @@ interface Props {
   service: ServiceConfig
   onEdit: () => void
   onDuplicate: () => void
+  onPreview?: () => void
 }
 
 // ── Spinner animation ─────────────────────────────────────────────────────────
@@ -259,7 +260,7 @@ function InlinePreview({ service, onStop, runKey }: { service: ServiceConfig; on
 
   return (
     <div className="border-t border-[#1e293b] bg-[#0a0f1e] rounded-b-xl overflow-hidden">
-      <div className="flex" style={{ minHeight: 300 }}>
+      <div className="flex" style={{ height: 420 }}>
 
         {/* ── Left: video feed ── */}
         <div className="flex flex-col border-r border-[#1e293b]" style={{ width: '55%' }}>
@@ -421,11 +422,10 @@ function InlinePreview({ service, onStop, runKey }: { service: ServiceConfig; on
 
 // ── Main ServiceCard ──────────────────────────────────────────────────────────
 
-export function ServiceCard({ service, onEdit, onDuplicate }: Props) {
+export function ServiceCard({ service, onEdit, onDuplicate, onPreview }: Props) {
   const qc = useQueryClient()
   const [showLog, setShowLog] = useState(false)
   const [moreOpen, setMoreOpen] = useState(false)
-  const [showPanel, setShowPanel] = useState(false)
   const [runKey, setRunKey] = useState('init')
   const spinner = useSpinner()
 
@@ -478,11 +478,11 @@ export function ServiceCard({ service, onEdit, onDuplicate }: Props) {
 
   const prvStartMut = useMutation({
     mutationFn: () => startPreview(service.name),
-    onSuccess: () => { inv(); setShowPanel(true) },
+    onSuccess: () => { inv(); onPreview?.() },
   })
   const prvStopMut = useMutation({
     mutationFn: () => stopPreview(service.name),
-    onSuccess: () => { inv(); setShowPanel(false) },
+    onSuccess: inv,
   })
 
   const state   = status?.state ?? 'stopped'
@@ -500,11 +500,6 @@ export function ServiceCard({ service, onEdit, onDuplicate }: Props) {
   const isDs   = status?.is_dataset_capturing ?? false
   const isPrev = status?.is_previewing ?? false
   const isTcp  = status?.tcp_push_running ?? false
-
-  // Keep showPanel in sync with server state — if server says preview is on, show the panel
-  useEffect(() => {
-    if (isPrev) setShowPanel(true)
-  }, [isPrev])
 
   const isRtspOrVideo = service.input_mode === 'rtsp' || service.input_mode === 'video'
 

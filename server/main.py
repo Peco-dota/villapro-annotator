@@ -11,9 +11,15 @@ from __future__ import annotations
 
 import argparse
 import logging
+import mimetypes
 import signal
 import sys
 import os
+
+# Windows registry often maps .js/.mjs to text/plain — override explicitly
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("application/javascript", ".mjs")
+mimetypes.add_type("text/css", ".css")
 
 # Ensure `app` package is importable from this directory
 sys.path.insert(0, os.path.dirname(__file__))

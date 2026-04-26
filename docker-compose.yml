@@ -15,8 +15,7 @@ services:
       # Optional: mount a folder from the host so you can easily drop in videos/images
       # - ~/villa-data:/villa-data
     environment:
-      - VISIONQ_SECRET=change-me-in-production   # change this before deploying!
-    # GPU support — requires nvidia-container-toolkit on the host machine
+      - VISIONQ_SECRET=123   # change this before deploying!
     deploy:
       resources:
         reservations:
