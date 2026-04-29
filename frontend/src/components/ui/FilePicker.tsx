@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
-import { browsePath, getFsHome, fsMkdir } from '../../lib/api'
-import type { FsFilter, FsBrowseResult } from '../../lib/api'
+import { browsePath, fsMkdir } from '../../lib/api'
+import type { FsFilter, FsBrowseResult, FileEntry } from '../../lib/api'
 import { Modal } from './Modal'
 import { Spinner } from './Spinner'
 import { Button } from './Button'
@@ -23,6 +23,25 @@ const fileIcon = (name: string) => {
   if (['json', 'annotatex'].includes(ext)) return '📦'
   if (['mp4', 'avi', 'mov', 'mkv', 'webm'].includes(ext)) return '🎥'
   return '📄'
+}
+
+const fmtSize = (bytes: number) => {
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+const fmtDuration = (sec: number) => {
+  const h = Math.floor(sec / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  const s = Math.floor(sec % 60)
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+const fmtDate = (ts: number) => {
+  const d = new Date(ts * 1000)
+  return d.toLocaleDateString()
 }
 
 export function FilePicker({ open, onClose, onSelect, filter = 'any', dirOnly = false, title, initialPath = '/' }: Props) {
@@ -59,15 +78,13 @@ export function FilePicker({ open, onClose, onSelect, filter = 'any', dirOnly = 
 
   useEffect(() => {
     if (!open) return
-    if (initialPath && initialPath !== '/') {
-      // If we have a real starting path, use it directly
+    if (initialPath && initialPath.startsWith('/') && initialPath !== '/') {
+      // Only treat as a real starting path if it's an absolute path
       setManualPath(initialPath)
       load(initialPath)
     } else {
-      // Ask the server for its home directory
-      getFsHome()
-        .then(({ home }) => { setManualPath(home); load(home) })
-        .catch(() => { setManualPath('/'); load('/') })
+      setManualPath('/villapro-data')
+      load('/villapro-data')
     }
   }, [open])
 
@@ -76,9 +93,9 @@ export function FilePicker({ open, onClose, onSelect, filter = 'any', dirOnly = 
     load(data.cwd + '/' + dir)
   }
 
-  const selectFile = (filename: string) => {
+  const selectFile = (entry: FileEntry) => {
     if (!data) return
-    onSelect(data.cwd + '/' + filename)
+    onSelect(data.cwd + '/' + entry.name)
     onClose()
   }
 
@@ -217,16 +234,20 @@ export function FilePicker({ open, onClose, onSelect, filter = 'any', dirOnly = 
               ))}
 
               {/* Files */}
-              {!dirOnly && data.files.map(file => (
+              {!dirOnly && data.files.map(entry => (
                 <button
-                  key={file}
-                  onClick={() => selectFile(file)}
+                  key={entry.name}
+                  onClick={() => selectFile(entry)}
                   className="w-full flex items-center gap-3 px-4 py-2 text-left hover:bg-[#1e293b] transition-colors cursor-pointer"
                 >
-                  <span className="text-base shrink-0">{fileIcon(file)}</span>
-                  <span className="flex-1 text-sm text-slate-300 truncate">{file}</span>
-                  <span className="text-xs text-slate-600 shrink-0">
-                    {file.split('.').pop()?.toUpperCase()}
+                  <span className="text-base shrink-0">{fileIcon(entry.name)}</span>
+                  <span className="flex-1 text-sm text-slate-300 truncate">{entry.name}</span>
+                  <span className="flex items-center gap-2 text-xs text-slate-600 shrink-0">
+                    {entry.duration != null && (
+                      <span className="text-slate-500">{fmtDuration(entry.duration)}</span>
+                    )}
+                    <span>{fmtSize(entry.size)}</span>
+                    <span>{fmtDate(entry.modified)}</span>
                   </span>
                 </button>
               ))}

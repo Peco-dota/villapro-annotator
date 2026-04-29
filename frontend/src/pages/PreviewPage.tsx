@@ -1,8 +1,8 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import {
-  getPreviewFrameUrl, getVideoState,
+  getMjpegStreamUrl, getVideoState,
   videoPause, videoSpeed, videoSeek, videoStep,
   sseUrl, api,
 } from '../lib/api'
@@ -118,22 +118,7 @@ export function PreviewPage() {
   const isVideo = params.get('mode') === 'video'
 
   // ── Frame feed ──
-  const [polledUrl, setPolledUrl] = useState('')
-  const [displayedUrl, setDisplayedUrl] = useState('')
-  const [fps, setFps] = useState(0)
-  const frameCountRef = useRef(0)
-
-  const refreshFrame = useCallback(() => {
-    if (!name) return
-    setPolledUrl(`${getPreviewFrameUrl(name)}&_t=${Date.now()}`)
-  }, [name])
-
-  useEffect(() => {
-    refreshFrame()
-    const frameId = setInterval(refreshFrame, 100)
-    const fpsId   = setInterval(() => { setFps(frameCountRef.current); frameCountRef.current = 0 }, 1000)
-    return () => { clearInterval(frameId); clearInterval(fpsId) }
-  }, [refreshFrame])
+  const mjpegUrl = useMemo(() => name ? getMjpegStreamUrl(name) : '', [name])
 
   // ── Results ──
   const [results, setResults] = useState<ServiceResults>({
@@ -214,7 +199,6 @@ export function PreviewPage() {
         <span className="text-slate-600">—</span>
         <div className="w-2 h-2 rounded-full bg-violet-400 animate-pulse" />
         <span className="text-sm text-slate-300 font-medium">{name}</span>
-        <span className="text-xs text-slate-600 ml-1">{fps} fps</span>
         <div className="ml-auto flex items-center gap-2">
           <div className={`w-2 h-2 rounded-full ${isLive ? 'bg-green-400 animate-pulse' : 'bg-slate-600'}`} />
           <span className="text-xs text-slate-500">
@@ -229,14 +213,7 @@ export function PreviewPage() {
         {/* ── Left: video feed ── */}
         <div className="flex flex-col border-r border-[#1e293b]" style={{ width: '58%' }}>
           <div className="flex-1 bg-black flex items-center justify-center overflow-hidden">
-            {polledUrl && (
-              <img key={polledUrl} src={polledUrl} alt="" className="hidden"
-                onLoad={() => { setDisplayedUrl(polledUrl); frameCountRef.current += 1 }} />
-            )}
-            {displayedUrl
-              ? <img src={displayedUrl} alt="preview" className="w-full h-full object-contain" />
-              : <p className="text-slate-600 text-sm">Waiting for frames…</p>
-            }
+            {mjpegUrl && <img src={mjpegUrl} alt="preview" className="w-full h-full object-contain" />}
           </div>
           {isVideo && <VideoControls name={name} />}
         </div>

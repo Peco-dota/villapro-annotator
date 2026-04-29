@@ -1,4 +1,6 @@
 """Dataset operations — export, augmentation, split, batch export, training."""
+import datetime
+import json
 import os
 import queue
 import threading
@@ -286,7 +288,31 @@ def augment_folder_endpoint(req: AugmentFolderRequest, background_tasks: Backgro
 
 # ── YOLO Training ─────────────────────────────────────────────────────────────
 
-MODELS_ROOT = Path.home() / "visionq-projects" / "models"
+MODELS_ROOT = Path(os.environ.get("VISIONQ_MODELS_DIR", "/villapro-data/models"))
+
+_HISTORY_PATH = Path(
+    os.environ.get("VISIONQ_DATA", str(Path.home()))
+) / "config" / "train_history.json"
+
+
+def _load_history() -> list[dict]:
+    try:
+        if _HISTORY_PATH.exists():
+            return json.loads(_HISTORY_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return []
+
+
+def _save_history_entry(entry: dict) -> None:
+    try:
+        history = _load_history()
+        history = [e for e in history if e.get("job_id") != entry["job_id"]]
+        history.insert(0, entry)
+        _HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _HISTORY_PATH.write_text(json.dumps(history, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
 
 class TrainRequest(BaseModel):
@@ -354,7 +380,6 @@ def train_endpoint(req: TrainRequest, background_tasks: BackgroundTasks,
     cancel_event = threading.Event()
     _train_cancel[job_id] = cancel_event
 
-    import datetime
     _active_train_job.clear()
     _active_train_job.update({
         "job_id": job_id,
@@ -404,6 +429,12 @@ def train_endpoint(req: TrainRequest, background_tasks: BackgroundTasks,
                     f"P={precision:.3f}  R={recall:.3f}  "
                     f"mAP50={map50:.3f}  mAP50-95={map5095:.3f}"
                 )
+                _jobs[job_id]["last_metrics"] = {
+                    "precision": round(precision, 4),
+                    "recall": round(recall, 4),
+                    "mAP50": round(map50, 4),
+                    "mAP50-95": round(map5095, 4),
+                }
                 # Check cancel flag
                 if cancel_event.is_set():
                     trainer.stop = True
@@ -423,10 +454,21 @@ def train_endpoint(req: TrainRequest, background_tasks: BackgroundTasks,
                 verbose=False,
             )
 
+            finished_at = datetime.datetime.now().isoformat()
+
             if cancel_event.is_set():
                 _log("─" * 52)
                 _log("Training cancelled by user.")
                 _job_failed(job_id, "Cancelled by user.")
+                _save_history_entry({
+                    "job_id": job_id, "run_name": run_name, "model": req.model,
+                    "data_yaml": req.data_yaml, "epochs_requested": req.epochs,
+                    "epochs_completed": _jobs[job_id].get("epoch", 0),
+                    "status": "cancelled", "started_at": _active_train_job.get("started_at"),
+                    "finished_at": finished_at, "output_dir": str(output_dir),
+                    "best_model": "", "device": device,
+                    "metrics": _jobs[job_id].get("last_metrics"),
+                })
                 _active_train_job.clear()
                 return
 
@@ -439,23 +481,51 @@ def train_endpoint(req: TrainRequest, background_tasks: BackgroundTasks,
             _log("─" * 52)
             _log(f"Complete!  Best weights → {best}")
 
+            best_str = str(best) if best.exists() else ""
             _job_done(job_id, {
-                "best_model": str(best) if best.exists() else "",
+                "best_model": best_str,
                 "run_name": run_name,
                 "output_dir": str(output_dir),
                 "device": device,
+            })
+            _save_history_entry({
+                "job_id": job_id, "run_name": run_name, "model": req.model,
+                "data_yaml": req.data_yaml, "epochs_requested": req.epochs,
+                "epochs_completed": _jobs[job_id].get("epoch", req.epochs),
+                "status": "done", "started_at": _active_train_job.get("started_at"),
+                "finished_at": finished_at, "output_dir": str(output_dir),
+                "best_model": best_str, "device": device,
+                "metrics": _jobs[job_id].get("last_metrics"),
             })
             _active_train_job.clear()
         except KeyboardInterrupt:
             _log("─" * 52)
             _log("Training force-stopped.")
             _job_failed(job_id, "Force-stopped by user.")
+            _save_history_entry({
+                "job_id": job_id, "run_name": run_name, "model": req.model,
+                "data_yaml": req.data_yaml, "epochs_requested": req.epochs,
+                "epochs_completed": _jobs[job_id].get("epoch", 0),
+                "status": "cancelled", "started_at": _active_train_job.get("started_at"),
+                "finished_at": datetime.datetime.now().isoformat(),
+                "output_dir": str(output_dir), "best_model": "", "device": "",
+                "metrics": _jobs[job_id].get("last_metrics"),
+            })
             _active_train_job.clear()
         except Exception as e:
             import traceback
             _log(f"ERROR: {e}")
             _log(traceback.format_exc())
             _job_failed(job_id, str(e))
+            _save_history_entry({
+                "job_id": job_id, "run_name": run_name, "model": req.model,
+                "data_yaml": req.data_yaml, "epochs_requested": req.epochs,
+                "epochs_completed": _jobs[job_id].get("epoch", 0),
+                "status": "failed", "started_at": _active_train_job.get("started_at"),
+                "finished_at": datetime.datetime.now().isoformat(),
+                "output_dir": str(output_dir), "best_model": "", "device": "",
+                "metrics": _jobs[job_id].get("last_metrics"),
+            })
             _active_train_job.clear()
         finally:
             log_q.put(None)  # sentinel
@@ -489,3 +559,25 @@ def train_log_stream(job_id: str, request: Request, _user: dict = Depends(requir
                 yield ": keep-alive\n\n"
 
     return StreamingResponse(_generate(), media_type="text/event-stream")
+
+
+# ── Training history ──────────────────────────────────────────────────────────
+
+@router.get("/train/history")
+def get_train_history(_user: dict = Depends(require_user)):
+    """Return all past training runs, newest first."""
+    return _load_history()
+
+
+@router.delete("/train/history/{job_id}")
+def delete_train_history_entry(job_id: str, _user: dict = Depends(require_user)):
+    """Remove a single entry from training history."""
+    history = _load_history()
+    updated = [e for e in history if e.get("job_id") != job_id]
+    if len(updated) == len(history):
+        raise HTTPException(status_code=404, detail="Entry not found.")
+    try:
+        _HISTORY_PATH.write_text(json.dumps(updated, indent=2), encoding="utf-8")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"deleted": job_id}

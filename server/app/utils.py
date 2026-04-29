@@ -401,7 +401,7 @@ def split_dataset(folder: str, split: dict, generate_yaml: bool = True) -> dict:
 
 # ── Recent projects ───────────────────────────────────────────────────────────
 
-RECENT_PROJECTS_FILE = Path.home() / ".annotatex_recent.json"
+RECENT_PROJECTS_FILE = Path(os.environ.get("VISIONQ_DATA", str(Path.home()))) / "config" / "recent_projects.json"
 
 
 def load_recent_projects() -> list[str]:

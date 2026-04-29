@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   startService, stopService, restartService, deleteService,
@@ -8,7 +8,7 @@ import {
   startDataset, stopDataset,
   startPreview, stopPreview,
   startTcpPush, stopTcpPush,
-  getPreviewFrameUrl, getVideoState,
+  getMjpegStreamUrl, getVideoState,
   videoPause, videoSpeed, videoSeek, videoStep,
   sseUrl, api,
 } from '../../lib/api'
@@ -207,30 +207,8 @@ function dirLabel(d: string | undefined, conf: number | undefined, detected: boo
 }
 
 function InlinePreview({ service, onStop, runKey }: { service: ServiceConfig; onStop: () => void; runKey: string }) {
-  const [polledUrl, setPolledUrl] = useState('')
-  const [displayedUrl, setDisplayedUrl] = useState('')
-  const [fps, setFps] = useState(0)
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const frameCountRef = useRef(0)
-  const fpsTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const mjpegUrl = useMemo(() => getMjpegStreamUrl(service.name), [service.name])
   const isVideo = service.input_mode === 'video'
-
-  const refreshFrame = useCallback(() => {
-    setPolledUrl(`${getPreviewFrameUrl(service.name)}&_t=${Date.now()}`)
-  }, [service.name])
-
-  useEffect(() => {
-    refreshFrame()
-    intervalRef.current = setInterval(refreshFrame, 100)
-    fpsTimerRef.current = setInterval(() => {
-      setFps(frameCountRef.current)
-      frameCountRef.current = 0
-    }, 1000)
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current)
-      if (fpsTimerRef.current) clearInterval(fpsTimerRef.current)
-    }
-  }, [refreshFrame])
 
   const { data: videoState, refetch: refetchVideo } = useQuery({
     queryKey: ['video-state', service.name],
@@ -269,7 +247,6 @@ function InlinePreview({ service, onStop, runKey }: { service: ServiceConfig; on
             <div className="flex items-center gap-2">
               <div className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse" />
               <span className="text-xs text-slate-400 font-medium">Live Preview</span>
-              <span className="text-xs text-slate-600">{fps} fps</span>
             </div>
             <div className="flex items-center gap-3">
               <button
@@ -290,16 +267,9 @@ function InlinePreview({ service, onStop, runKey }: { service: ServiceConfig; on
             </div>
           </div>
 
-          {/* Frame */}
+          {/* Frame — MJPEG stream */}
           <div className="flex-1 bg-black flex items-center justify-center">
-            {polledUrl && (
-              <img key={polledUrl} src={polledUrl} alt="" className="hidden"
-                onLoad={() => { setDisplayedUrl(polledUrl); frameCountRef.current += 1 }} />
-            )}
-            {displayedUrl
-              ? <img src={displayedUrl} alt="preview" className="max-w-full max-h-full object-contain" />
-              : <p className="text-xs text-slate-600">Waiting for frames…</p>
-            }
+            <img src={mjpegUrl} alt="preview" className="max-w-full max-h-full object-contain" />
           </div>
 
           {/* Video controls */}

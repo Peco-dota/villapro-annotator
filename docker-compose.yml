@@ -10,12 +10,11 @@ services:
       # - "9001:9001"
       # - "9002:9002"
     volumes:
-      # All persistent data lives here — projects, models, exports, config, database
-      - visionq-data:/data
-      # Optional: mount a folder from the host so you can easily drop in videos/images
-      # - ~/villa-data:/villa-data
+      # All persistent user data — projects, models, recordings, config, database
+      - ./villapro-data:/villapro-data
     environment:
       - VISIONQ_SECRET=123   # change this before deploying!
+      - VISIONQ_DATA=/villapro-data
     deploy:
       resources:
         reservations:
@@ -24,5 +23,3 @@ services:
               count: all
               capabilities: [gpu]
 
-volumes:
-  visionq-data:

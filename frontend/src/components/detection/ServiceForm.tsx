@@ -15,7 +15,7 @@ interface Props {
 }
 
 const defaults: Omit<ServiceConfig, 'name'> = {
-  model_path: 'yolo26n.pt',
+  model_path: '',
   input_mode: 'rtsp',
   input_host: '0.0.0.0',
   input_port: 5050,

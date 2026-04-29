@@ -98,7 +98,22 @@ def _notify_internal(service_name: str, payload: dict) -> None:
         pass  # never break the detection thread over a notification failure
 
 
-_PERSIST_PATH = os.path.expanduser("~/.visionq_services.json")
+def _notify_mjpeg_frame(service_name: str, frame) -> None:
+    """Fan the latest annotated frame out to all MJPEG viewers.
+
+    Safe to call from any background thread — deferred import avoids circular imports.
+    """
+    try:
+        from app.routers.detection import _notify_mjpeg
+        _notify_mjpeg(service_name, frame)
+    except Exception:
+        pass
+
+
+_PERSIST_PATH = os.path.join(
+    os.environ.get("VISIONQ_DATA", os.path.expanduser("~")),
+    "config", "visionq_services.json",
+)
 _MAX_LOG = 50
 _MISS_TOLERANCE = 2       # consecutive frames without a car before buffer is cleared
 _MIN_DIR_FRAMES = 4       # minimum frames in buffer before direction is considered reliable
@@ -892,10 +907,12 @@ class DetectionService:
                             record_dir=self._record_dir_cfg,
                         )
                     if self._preview_enabled and results:
+                        _frame = results[0].plot()
                         try:
-                            self._preview_queue.put_nowait(results[0].plot())
+                            self._preview_queue.put_nowait(_frame)
                         except queue.Full:
-                            pass  # Qt hasn't consumed last frame yet — drop this one
+                            pass
+                        _notify_mjpeg_frame(self._name, _frame)
                 except Exception as e:
                     self._append_log(LogEntry.from_error(str(e)))
                 finally:
@@ -1091,10 +1108,12 @@ class DetectionService:
                             record_dir=self._record_dir_cfg,
                         )
                     if self._preview_enabled and results:
+                        _frame = results[0].plot()
                         try:
-                            self._preview_queue.put_nowait(results[0].plot())
+                            self._preview_queue.put_nowait(_frame)
                         except queue.Full:
                             pass
+                        _notify_mjpeg_frame(self._name, _frame)
                 except Exception as e:
                     self._append_log(LogEntry.from_error(str(e)))
                 finally:
@@ -1116,7 +1135,7 @@ class DetectionService:
     def _resolve_record_dir(self, configured_dir: str) -> str:
         if configured_dir.strip():
             return configured_dir.strip()
-        return os.path.expanduser("~/VisionQ_recordings")
+        return "/villapro-data/recordings"
 
     def _open_video_writer_if_needed(
         self,
@@ -1270,6 +1289,13 @@ class DetectionService:
         """Return the latest annotated frame (numpy BGR) or None. Called from Qt main thread."""
         try:
             return self._preview_queue.get_nowait()
+        except queue.Empty:
+            return None
+
+    def get_preview_frame_blocking(self, timeout: float = 0.1):
+        """Block up to *timeout* seconds for the next annotated frame, or return None."""
+        try:
+            return self._preview_queue.get(timeout=timeout)
         except queue.Empty:
             return None
 

@@ -23,6 +23,24 @@ _sse_queues: dict[str, list[asyncio.Queue]] = {}
 _sse_lock = asyncio.Lock()
 _event_loop: asyncio.AbstractEventLoop | None = None
 
+# MJPEG subscribers: service_name -> list of per-viewer asyncio queues (numpy BGR frames)
+_mjpeg_queues: dict[str, list[asyncio.Queue]] = {}
+
+
+def _notify_mjpeg(service_name: str, frame) -> None:
+    """Called from detection threads to fan-out a frame to all MJPEG viewers."""
+    if _event_loop is None:
+        return
+    _event_loop.call_soon_threadsafe(_do_notify_mjpeg, service_name, frame)
+
+
+def _do_notify_mjpeg(service_name: str, frame) -> None:
+    for q in list(_mjpeg_queues.get(service_name, [])):
+        try:
+            q.put_nowait(frame)
+        except asyncio.QueueFull:
+            pass  # slow viewer — drop this frame rather than build lag
+
 
 @router.on_event("startup")
 async def _capture_loop():
@@ -279,7 +297,7 @@ def start_debug(name: str, path: Optional[str] = None,
     if not path:
         import os as _os
         from datetime import datetime
-        debug_dir = _os.path.expanduser(f"~/VisionQ_debug/{name}")
+        debug_dir = _os.path.join(_os.environ.get("VISIONQ_DATA", "/data"), "debug", name)
         _os.makedirs(debug_dir, exist_ok=True)
         path = _os.path.join(debug_dir, f"debug_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
     svc.start_direction_debug(path)
@@ -380,12 +398,51 @@ def get_preview_frame(name: str, token: Optional[str] = None, _user: dict = Depe
     if frame is None:
         raise HTTPException(status_code=204, detail="No frame available.")
     import cv2
-    import numpy as np
-    # frame is a numpy array (annotated by ultralytics .plot())
     ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to encode frame.")
     return Response(content=bytes(buf), media_type="image/jpeg")
+
+
+@router.get("/services/{name}/preview/mjpeg")
+async def mjpeg_stream(request: Request, name: str, token: Optional[str] = None,
+                       _user: dict = Depends(require_user)):
+    """Stream annotated frames as MJPEG.
+
+    Each connected viewer gets its own queue so multiple tabs/clients all
+    receive every frame independently without competing for the same data.
+    """
+    svc = get_registry().get_service(name)
+    if svc is None:
+        raise HTTPException(status_code=404, detail="Service not running.")
+
+    import cv2
+
+    q: asyncio.Queue = asyncio.Queue(maxsize=2)
+    _mjpeg_queues.setdefault(name, []).append(q)
+
+    async def generate():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    frame = await asyncio.wait_for(q.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                if ok:
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n" + bytes(buf) + b"\r\n"
+                    )
+        finally:
+            try:
+                _mjpeg_queues[name].remove(q)
+            except (ValueError, KeyError):
+                pass
+
+    return StreamingResponse(generate(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
 # ── Dataset capture ───────────────────────────────────────────────────────────
@@ -398,7 +455,7 @@ def start_dataset(name: str, dataset_dir: Optional[str] = None,
     if svc is None or cfg is None:
         raise HTTPException(status_code=404, detail="Service not running.")
     svc.start_dataset_capture(
-        dataset_dir or cfg.dataset_dir or os.path.expanduser("~/VisionQ_dataset"),
+        dataset_dir or cfg.dataset_dir or os.path.join(os.environ.get("VISIONQ_DATA", "/data"), "datasets"),
         interval or cfg.dataset_interval or 10,
     )
     return {"dataset_capture": True}

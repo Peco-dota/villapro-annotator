@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useMemo } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import {
-  getPreviewFrameUrl, getVideoState,
+  getMjpegStreamUrl, getVideoState,
   videoPause, videoSpeed, videoSeek, videoStep,
 } from '../../lib/api'
 import type { ServiceConfig } from '../../lib/types'
@@ -15,33 +15,8 @@ interface Props {
 const SPEEDS = [0.5, 1, 2, 4]
 
 export function PreviewWindow({ service, onClose }: Props) {
-  // polledUrl is the latest URL being fetched; displayedUrl is the last successfully loaded frame
-  const [polledUrl, setPolledUrl] = useState('')
-  const [displayedUrl, setDisplayedUrl] = useState('')
-  const [fps, setFps] = useState(0)
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const frameCountRef = useRef(0)
-  const fpsTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const mjpegUrl = useMemo(() => getMjpegStreamUrl(service.name), [service.name])
   const isVideo = service.input_mode === 'video'
-
-  // Poll for new frames — only update displayedUrl on successful load
-  const refreshFrame = useCallback(() => {
-    const base = getPreviewFrameUrl(service.name)
-    setPolledUrl(`${base}&_t=${Date.now()}`)
-  }, [service.name])
-
-  useEffect(() => {
-    refreshFrame()
-    intervalRef.current = setInterval(refreshFrame, 100) // ~10fps poll
-    fpsTimerRef.current = setInterval(() => {
-      setFps(frameCountRef.current)
-      frameCountRef.current = 0
-    }, 1000)
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current)
-      if (fpsTimerRef.current) clearInterval(fpsTimerRef.current)
-    }
-  }, [refreshFrame])
 
   // Video state (position, duration, speed, paused) — only for video mode
   const { data: videoState, refetch: refetchVideo } = useQuery({
@@ -85,32 +60,17 @@ export function PreviewWindow({ service, onClose }: Props) {
         <div className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-violet-400 animate-pulse" />
           <span className="text-sm font-medium text-slate-200">Preview — {service.name}</span>
-          <span className="text-xs text-slate-600">{fps} fps</span>
         </div>
         <button onClick={onClose} className="text-slate-500 hover:text-slate-300 text-lg cursor-pointer px-1">&times;</button>
       </div>
 
-      {/* Frame */}
+      {/* Frame — MJPEG stream: browser keeps one persistent connection, server pushes frames */}
       <div className="relative bg-black flex items-center justify-center" style={{ minHeight: 240 }}>
-        {/* Hidden img fetches the polled URL; only promotes to displayedUrl on successful load */}
-        {polledUrl && (
-          <img
-            key={polledUrl}
-            src={polledUrl}
-            alt=""
-            className="hidden"
-            onLoad={() => { setDisplayedUrl(polledUrl); frameCountRef.current += 1 }}
-          />
-        )}
-        {displayedUrl ? (
-          <img
-            src={displayedUrl}
-            alt="preview"
-            className="max-w-full max-h-[60vh] object-contain"
-          />
-        ) : (
-          <p className="text-xs text-slate-600">Waiting for frames…</p>
-        )}
+        <img
+          src={mjpegUrl}
+          alt="preview"
+          className="max-w-full max-h-[60vh] object-contain"
+        />
       </div>
 
       {/* Video controls — only shown in video mode */}

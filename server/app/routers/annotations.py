@@ -138,6 +138,10 @@ def replace_boxes(req: BoxesReplaceRequest, _user: dict = Depends(require_user))
     ia.boxes = boxes
     p.modified = True
     p.invalidate_annotated_count()
+    try:
+        p.save()
+    except Exception:
+        pass
     return {"filename": req.filename, "boxes": [b.to_dict() for b in ia.boxes]}
 
 
@@ -163,6 +167,10 @@ def copy_boxes_from_prev(project_path: str, filename: str, _user: dict = Depends
     ia.boxes = new_boxes
     p.modified = True
     p.invalidate_annotated_count()
+    try:
+        p.save()
+    except Exception:
+        pass
     return {"filename": filename, "boxes": [b.to_dict() for b in ia.boxes], "copied": len(new_boxes)}
 
 

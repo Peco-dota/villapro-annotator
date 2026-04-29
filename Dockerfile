@@ -1,3 +1,7 @@
+# GPU (default): docker build .
+# CPU/NAS:       docker build --build-arg BASE=ubuntu:22.04 .
+ARG BASE=nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
 # ── Stage 1: Build the React frontend ────────────────────────────────────────
 FROM node:20-slim AS frontend-build
 
@@ -10,10 +14,8 @@ RUN npm run build
 # Output is in /build/frontend/dist
 
 
-# ── Stage 2: Production image (CUDA + Python) ─────────────────────────────────
-# Use CUDA 12.1 runtime — works with most modern NVIDIA drivers (>=525)
-# Switch to nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 for newer GPUs
-FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+# ── Stage 2: Production image ─────────────────────────────────────────────────
+FROM ${BASE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
@@ -49,10 +51,10 @@ COPY server/ ./
 COPY --from=frontend-build /build/frontend/dist ./static
 
 # Data directory — will be mounted as a volume so data persists
-RUN mkdir -p /data/projects /data/models /data/config
+RUN mkdir -p /data/projects /data/models /data/config /data/recordings /data/debug /data/datasets
 
 # Default environment — override in docker-compose or with -e flags
-ENV VISIONQ_DATA=/data
+ENV VISIONQ_DATA=/villapro-data
 ENV VISIONQ_SECRET=change-me-in-production
 
 EXPOSE 8000

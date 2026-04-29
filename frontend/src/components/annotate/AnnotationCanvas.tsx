@@ -29,18 +29,27 @@ interface PendingBox {
 function useImage(src: string) {
   const [img, setImg] = useState<HTMLImageElement | null>(null)
   const [size, setSize] = useState({ w: 0, h: 0 })
+  const [imgError, setImgError] = useState(false)
   useEffect(() => {
     if (!src) return
+    setImgError(false)
     const el = new window.Image()
     el.crossOrigin = 'anonymous'
     el.onload = () => { setImg(el); setSize({ w: el.naturalWidth, h: el.naturalHeight }) }
+    el.onerror = () => { setImg(null); setImgError(true) }
     el.src = src
-    return () => { el.onload = null }
+    return () => { el.onload = null; el.onerror = null }
   }, [src])
-  return { img, naturalW: size.w, naturalH: size.h }
+  return { img, naturalW: size.w, naturalH: size.h, imgError }
 }
 
-function uuid() { return crypto.randomUUID() }
+function uuid() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID()
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16)
+  })
+}
 
 function ClassPickerPopup({ classes, screenX, screenY, onPick, onCancel }: {
   classes: ClassDef[]
@@ -108,7 +117,7 @@ export function AnnotationCanvas({
   const panOffsetStart = useRef({ x: 0, y: 0 })
 
   const imgSrc = filename ? getImageFile(projectPath, filename) : ''
-  const { img, naturalW, naturalH } = useImage(imgSrc)
+  const { img, naturalW, naturalH, imgError } = useImage(imgSrc)
 
   // scale = fitScale * zoom, offset centers image then adjusts for pan
   const scale = fitScale * zoom
@@ -174,6 +183,7 @@ export function AnnotationCanvas({
       return
     }
     if (tool !== 'draw') return
+    if (!img) return
     const pos = e.target.getStage()!.getPointerPosition()!
     setDrawing({ x: pos.x, y: pos.y })
     setDraft(null)
@@ -359,7 +369,14 @@ export function AnnotationCanvas({
         />
       )}
 
-      {!img && filename && (
+      {imgError && filename && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center px-6">
+          <span className="text-red-400 text-sm font-medium">Image not found</span>
+          <span className="text-slate-500 text-xs font-mono">{filename}</span>
+          <span className="text-slate-600 text-xs">Make sure images are in the container-accessible path (e.g. /villapro-data/…)</span>
+        </div>
+      )}
+      {!img && !imgError && filename && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="w-6 h-6 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
         </div>

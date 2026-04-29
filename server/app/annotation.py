@@ -61,7 +61,7 @@ class BoundingBox:
     def to_dict(self) -> dict:
         return {
             "id": self.id,
-            "class_id": self.class_id,
+            "class_index": self.class_id,
             "cx": self.cx,
             "cy": self.cy,
             "w": self.w,
@@ -73,7 +73,7 @@ class BoundingBox:
     def from_dict(cls, d: dict) -> "BoundingBox":
         return cls(
             id=d.get("id", str(uuid.uuid4())),
-            class_id=d.get("class_id", 0),
+            class_id=d.get("class_index", d.get("class_id", 0)),
             cx=d.get("cx", 0.0),
             cy=d.get("cy", 0.0),
             w=d.get("w", 0.0),

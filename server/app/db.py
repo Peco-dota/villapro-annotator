@@ -11,6 +11,7 @@ On first startup, two default users are seeded:
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 from typing import Optional
@@ -25,7 +26,7 @@ def _hash_password(plain: str) -> str:
 def _check_password(plain: str, hashed: str) -> bool:
     return _bcrypt.checkpw(plain.encode(), hashed.encode())
 
-DB_PATH = Path.home() / ".config" / "visionq_users.db"
+DB_PATH = Path(os.environ.get("VISIONQ_DATA", str(Path.home()))) / "config" / "visionq_users.db"
 
 _DEFAULT_USERS = [
     ("admin",    "admin123",    "admin"),

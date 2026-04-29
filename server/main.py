@@ -33,7 +33,7 @@ from fastapi.responses import FileResponse
 
 from app.config import init_config
 from app.version import VERSION
-from app.routers import system, projects, annotations, detection, datasets, fs, auth
+from app.routers import system, projects, annotations, detection, datasets, fs, auth, recordings
 from app.db import init_db
 
 logging.basicConfig(
@@ -93,6 +93,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
     app.include_router(detection.router)
     app.include_router(datasets.router)
     app.include_router(fs.router)
+    app.include_router(recordings.router)
 
     # Serve built React frontend if the dist folder exists (production / Docker)
     _dist = os.path.join(os.path.dirname(__file__), "static")

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { FsFilter } from '../../lib/api'
 import { FilePicker } from './FilePicker'
+import { UploadButton } from './UploadButton'
 
 interface Props {
   label?: string
@@ -29,6 +30,9 @@ export function PathInput({ label, value, onChange, filter = 'any', dirOnly = fa
             placeholder:text-slate-500 focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500/40
             font-mono"
         />
+        {!dirOnly && (
+          <UploadButton filter={filter} onUploaded={onChange} />
+        )}
         <button
           type="button"
           onClick={() => setOpen(true)}

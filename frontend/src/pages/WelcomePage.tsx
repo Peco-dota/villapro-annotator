@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { getRecentProjects, openProject, createProject, getSystemInfo, removeRecentProject, getActiveTrain } from '../lib/api'
 import { getUser, clearToken } from '../lib/auth'
@@ -13,6 +13,7 @@ import { MergeDatasets } from '../components/merge/MergeDatasets'
 import { AugmentDataset } from '../components/augment/AugmentDataset'
 import { TrainModel } from '../components/train/TrainModel'
 import { DetectionSection } from '../components/detection/DetectionSection'
+import { RecordingsSection } from '../components/recordings/RecordingsSection'
 
 interface RecentProject {
   name: string
@@ -88,8 +89,8 @@ function CreateProjectModal({ open, onClose }: { open: boolean; onClose: () => v
           value={form.save_path}
           onChange={v => set('save_path')(v)}
           filter="dir"
-          dirOnly={false}
-          placeholder="~/visionq-projects/<username>/ (auto)"
+          dirOnly={true}
+          placeholder="(auto — /data/projects/<username>/)"
           pickerTitle="Choose save location"
         />
         <PathInput
@@ -362,14 +363,24 @@ const IconMerge = () => (
   </svg>
 )
 
+const IconRecordings = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+    <rect x="2" y="4" width="20" height="16" rx="2" />
+    <circle cx="12" cy="12" r="3" />
+    <path d="M17 4v16M7 4v16" />
+  </svg>
+)
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-type Section = 'annotate' | 'merge' | 'augment' | 'train' | 'detection'
+type Section = 'annotate' | 'merge' | 'augment' | 'train' | 'detection' | 'recordings'
 
 export function WelcomePage() {
   const nav = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
   const user = getUser()
-  const [activeSection, setActiveSection] = useState<Section>('annotate')
+  const activeSection = (searchParams.get('tab') as Section | null) ?? 'annotate'
+  const setActiveSection = (s: Section) => setSearchParams({ tab: s }, { replace: true })
 
   const { data: info } = useQuery({ queryKey: ['sysinfo'], queryFn: getSystemInfo, retry: false })
   const { data: trainActive } = useQuery({ queryKey: ['train-active'], queryFn: getActiveTrain, refetchInterval: 3000 })
@@ -445,6 +456,13 @@ export function WelcomePage() {
             onClick={() => setActiveSection('detection')}
             active={activeSection === 'detection'}
           />
+          <NavTile
+            icon={<IconRecordings />}
+            label="Recordings"
+            description="Browse, download and delete recorded streams"
+            onClick={() => setActiveSection('recordings')}
+            active={activeSection === 'recordings'}
+          />
         </aside>
 
         {/* Main content */}
@@ -457,6 +475,7 @@ export function WelcomePage() {
           {activeSection === 'merge' && <MergeDatasets />}
           {activeSection === 'augment' && <AugmentDataset />}
           {activeSection === 'detection' && <DetectionSection />}
+          {activeSection === 'recordings' && <RecordingsSection />}
 
         </main>
       </div>

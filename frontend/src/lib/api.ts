@@ -134,6 +134,11 @@ export const getPreviewFrameUrl = (name: string): string => {
   const base = (import.meta.env.VITE_API_URL as string) || ''
   return `${base}/api/detection/services/${encodeURIComponent(name)}/preview/frame?token=${encodeURIComponent(token)}`
 }
+export const getMjpegStreamUrl = (name: string): string => {
+  const token = localStorage.getItem('visionq_token') ?? ''
+  const base = (import.meta.env.VITE_API_URL as string) || ''
+  return `${base}/api/detection/services/${encodeURIComponent(name)}/preview/mjpeg?token=${encodeURIComponent(token)}`
+}
 // Video controls
 export const videoSeek = (name: string, delta: number) =>
   api.post(`/api/detection/services/${name}/video/seek`, null, { params: { delta } }).then(r => r.data)
@@ -158,11 +163,18 @@ export const stopTcpPush = (name: string) =>
 // ── Filesystem ───────────────────────────────────────────────────────────────
 export type FsFilter = 'any' | 'project' | 'images_dir' | 'model' | 'video' | 'yaml' | 'dir'
 
+export interface FileEntry {
+  name: string
+  size: number       // bytes
+  modified: number   // unix timestamp (seconds)
+  duration?: number | null  // seconds, videos only
+}
+
 export interface FsBrowseResult {
   cwd: string
   parent: string | null
   dirs: string[]
-  files: string[]
+  files: FileEntry[]
 }
 
 export const browsePath = (path: string, filter: FsFilter = 'any'): Promise<FsBrowseResult> =>
@@ -170,6 +182,44 @@ export const browsePath = (path: string, filter: FsFilter = 'any'): Promise<FsBr
 
 export const getFsHome = (): Promise<{ home: string }> =>
   api.get('/api/fs/home').then(r => r.data)
+
+export const uploadFile = (
+  file: File,
+  destDir: string,
+  onProgress?: (pct: number) => void,
+): Promise<{ path: string }> => {
+  const form = new FormData()
+  form.append('file', file)
+  return api.post('/api/fs/upload', form, {
+    params: { dest: destDir },
+    headers: { 'Content-Type': 'multipart/form-data' },
+    onUploadProgress: e => {
+      if (onProgress && e.total) onProgress(Math.round((e.loaded / e.total) * 100))
+    },
+  }).then(r => r.data)
+}
+
+// ── Recordings ────────────────────────────────────────────────────────────────
+
+export interface Recording {
+  path: string
+  filename: string
+  service: string
+  size_bytes: number
+  created_at: number  // unix timestamp (seconds)
+}
+
+export const listRecordings = (): Promise<Recording[]> =>
+  api.get('/api/recordings').then(r => r.data)
+
+export const deleteRecording = (path: string): Promise<{ deleted: string }> =>
+  api.delete('/api/recordings', { params: { path } }).then(r => r.data)
+
+export const getRecordingDownloadUrl = (path: string): string => {
+  const token = localStorage.getItem('visionq_token') ?? ''
+  const base = (import.meta.env.VITE_API_URL as string) || ''
+  return `${base}/api/recordings/download?path=${encodeURIComponent(path)}&token=${encodeURIComponent(token)}`
+}
 
 export const fsMkdir = (parent: string, name: string): Promise<{ path: string }> =>
   api.post('/api/fs/mkdir', { parent, name }).then(r => r.data)
@@ -184,3 +234,25 @@ export const cancelTrain = (force = false) => api.post('/api/datasets/train/canc
 export const getActiveTrain = () => api.get('/api/datasets/train/active').then(r => r.data)
 export const trainLogUrl = (jobId: string): string => sseUrl(`/api/datasets/train/log/${jobId}`)
 export const getJob = (job_id: string) => api.get(`/api/datasets/jobs/${job_id}`).then(r => r.data)
+
+export interface TrainHistoryEntry {
+  job_id: string
+  run_name: string
+  model: string
+  data_yaml: string
+  epochs_requested: number
+  epochs_completed: number
+  status: 'done' | 'failed' | 'cancelled'
+  started_at: string | null
+  finished_at: string | null
+  output_dir: string
+  best_model: string
+  device: string
+  metrics: { precision: number; recall: number; mAP50: number; 'mAP50-95': number } | null
+}
+
+export const getTrainHistory = (): Promise<TrainHistoryEntry[]> =>
+  api.get('/api/datasets/train/history').then(r => r.data)
+
+export const deleteTrainHistoryEntry = (job_id: string) =>
+  api.delete(`/api/datasets/train/history/${job_id}`).then(r => r.data)

@@ -14,7 +14,7 @@ import secrets
 from pathlib import Path
 from typing import Optional
 
-DEFAULT_CONFIG_PATH = Path.home() / ".config" / "visionq.json"
+DEFAULT_CONFIG_PATH = Path(os.environ.get("VISIONQ_DATA", str(Path.home() / ".config"))) / "visionq.json"
 
 _DEFAULT: dict = {
     "host": "0.0.0.0",

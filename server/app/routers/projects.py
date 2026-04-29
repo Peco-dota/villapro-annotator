@@ -19,10 +19,10 @@ from app.utils import load_recent_projects, add_recent_project, remove_recent_pr
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
+PROJECTS_ROOT = Path(os.environ.get("VISIONQ_DATA", str(Path.home()))) / "projects"
+
 # In-memory store of open projects: path -> Project
 _open_projects: dict[str, Project] = {}
-
-PROJECTS_ROOT = Path.home() / "visionq-projects"
 
 
 def _user_projects_dir(username: str) -> Path:

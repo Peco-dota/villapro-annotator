@@ -1,11 +1,120 @@
 import { useState, useEffect, useRef } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { trainModel, cancelTrain, getActiveTrain, trainLogUrl, getJob } from '../../lib/api'
+import { trainModel, cancelTrain, getActiveTrain, trainLogUrl, getJob, getTrainHistory, deleteTrainHistoryEntry } from '../../lib/api'
+import type { TrainHistoryEntry } from '../../lib/api'
 import { Button } from '../ui/Button'
 import { PathInput } from '../ui/PathInput'
 import { Spinner } from '../ui/Spinner'
 
 const STORAGE_KEY = 'visionq_train_job'
+
+// ── Training history ──────────────────────────────────────────────────────────
+
+const STATUS_STYLE: Record<string, string> = {
+  done:      'bg-green-900/30 text-green-400 border-green-700/40',
+  failed:    'bg-red-900/30 text-red-400 border-red-700/40',
+  cancelled: 'bg-slate-800 text-slate-400 border-slate-600',
+}
+
+function TrainHistory({ onUseModel }: { onUseModel: (path: string) => void }) {
+  const qc = useQueryClient()
+  const { data: history = [], isLoading } = useQuery({
+    queryKey: ['train-history'],
+    queryFn: getTrainHistory,
+  })
+  const delMut = useMutation({
+    mutationFn: deleteTrainHistoryEntry,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['train-history'] }),
+  })
+  const [confirmId, setConfirmId] = useState<string | null>(null)
+
+  const fmtDate = (iso: string | null) =>
+    iso ? new Date(iso).toLocaleString() : '—'
+
+  if (isLoading) return null
+  if (history.length === 0) return (
+    <div className="border border-dashed border-[#1e293b] rounded-xl p-8 text-center text-slate-600 text-sm">
+      No training runs yet — history will appear here after your first run.
+    </div>
+  )
+
+  return (
+    <div className="border border-[#1e293b] rounded-xl overflow-hidden">
+      <div className="px-4 py-2.5 bg-[#0f172a] border-b border-[#1e293b]">
+        <span className="text-sm font-medium text-slate-200">Training History</span>
+        <span className="text-xs text-slate-600 ml-2">{history.length} run{history.length !== 1 ? 's' : ''}</span>
+      </div>
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="border-b border-[#1e293b] bg-[#0a0f1e]">
+            {['Run', 'Date', 'Status', 'Epochs', 'mAP50', 'mAP50-95', ''].map(h => (
+              <th key={h} className="px-3 py-2 text-left text-xs font-bold text-slate-600 uppercase tracking-wider">{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {history.map((e: TrainHistoryEntry) => (
+            <tr key={e.job_id} className="border-b border-[#1e293b]/50 hover:bg-[#1e293b]/20 transition-colors">
+              <td className="px-3 py-2.5">
+                <p className="text-slate-200 text-xs font-medium">{e.run_name}</p>
+                <p className="text-slate-600 text-[10px] font-mono mt-0.5">{e.model}</p>
+              </td>
+              <td className="px-3 py-2.5 text-xs text-slate-500 whitespace-nowrap">{fmtDate(e.started_at)}</td>
+              <td className="px-3 py-2.5">
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${STATUS_STYLE[e.status] ?? STATUS_STYLE.cancelled}`}>
+                  {e.status.toUpperCase()}
+                </span>
+              </td>
+              <td className="px-3 py-2.5 text-xs text-slate-400">
+                {e.epochs_completed}/{e.epochs_requested}
+              </td>
+              <td className="px-3 py-2.5 text-xs font-mono text-violet-400">
+                {e.metrics ? e.metrics.mAP50.toFixed(3) : '—'}
+              </td>
+              <td className="px-3 py-2.5 text-xs font-mono text-violet-300">
+                {e.metrics ? e.metrics['mAP50-95'].toFixed(3) : '—'}
+              </td>
+              <td className="px-3 py-2.5">
+                <div className="flex items-center gap-2 justify-end">
+                  {e.best_model && (
+                    <button
+                      onClick={() => onUseModel(e.best_model)}
+                      className="text-xs text-violet-400 hover:text-violet-300 cursor-pointer transition-colors whitespace-nowrap"
+                      title={e.best_model}
+                    >
+                      Use model
+                    </button>
+                  )}
+                  {confirmId === e.job_id ? (
+                    <span className="flex items-center gap-1">
+                      <button
+                        onClick={() => { delMut.mutate(e.job_id); setConfirmId(null) }}
+                        className="text-xs text-red-400 hover:text-red-300 cursor-pointer font-medium"
+                      >
+                        Confirm
+                      </button>
+                      <span className="text-slate-700">|</span>
+                      <button onClick={() => setConfirmId(null)} className="text-xs text-slate-500 hover:text-slate-300 cursor-pointer">
+                        Cancel
+                      </button>
+                    </span>
+                  ) : (
+                    <button
+                      onClick={() => setConfirmId(e.job_id)}
+                      className="text-xs text-slate-600 hover:text-red-400 cursor-pointer transition-colors"
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
 
 function SectionHeader({ label }: { label: string }) {
   return <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">{label}</p>
@@ -238,7 +347,7 @@ export function TrainModel() {
         <h2 className="text-base font-semibold text-slate-100 mb-1">Train Model</h2>
         <p className="text-sm text-slate-500">
           Train a YOLO model on the server using an exported dataset.
-          Best weights are saved to <span className="font-mono text-slate-400">~/visionq-projects/models/&lt;run-name&gt;/weights/best.pt</span>.
+          Best weights are saved to <span className="font-mono text-slate-400">/villapro-data/models/&lt;run-name&gt;/weights/best.pt</span>.
         </p>
       </div>
 
@@ -323,7 +432,7 @@ export function TrainModel() {
                   focus:outline-none focus:border-violet-500" />
             </div>
             <p className="text-xs text-slate-600">
-              Weights → <span className="font-mono text-slate-500">~/visionq-projects/models/{runName || 'my_training'}/weights/best.pt</span>
+              Weights → <span className="font-mono text-slate-500">/villapro-data/models/{runName || 'my_training'}/weights/best.pt</span>
             </p>
           </div>
         </>
@@ -416,6 +525,11 @@ export function TrainModel() {
           </Button>
         )}
       </div>
+
+      <TrainHistory onUseModel={(path) => {
+        setModelPreset('__custom__')
+        setCustomModelPath(path)
+      }} />
     </div>
   )
 }
