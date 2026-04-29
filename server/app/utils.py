@@ -173,54 +173,173 @@ def export_coco(project, output_dir: str) -> dict:
             "classes": len(project.classes)}
 
 
-# ── Batch (multi-project) YOLO Export ────────────────────────────────────────
+# ── Batch (multi-source) YOLO Export ─────────────────────────────────────────
 
-def batch_export_yolo(project_paths: list[str], output_dir: str,
-                      split: Optional[dict] = None,
-                      generate_yaml: bool = True,
-                      aug_cfg=None,
-                      progress_cb=None) -> dict:
-    from app.project import Project
+_YOLO_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
+
+
+def _load_source_entries(source_path: str, source_idx: int) -> tuple[list, list[str]]:
+    """Return (entries, class_names) from a .annotatex project file or a YOLO dataset dir.
+
+    entries = list of (src_path, boxes, output_stem, suffix)
+    class_names = ordered list of class name strings for this source
+    """
     from app.annotation import BoundingBox
-    import copy
+    import copy as _copy
 
-    output_dir = Path(output_dir)
+    path = Path(source_path)
+    prefix = f"s{source_idx}"
 
-    projects: list[Project] = []
-    for p in project_paths:
-        proj = Project.load(p)
-        projects.append(proj)
-
-    unified_names: list[str] = []
-    name_to_uid: dict[str, int] = {}
-    for proj in projects:
-        for cls in proj.classes:
-            if cls.name not in name_to_uid:
-                name_to_uid[cls.name] = len(unified_names)
-                unified_names.append(cls.name)
-
-    all_entries: list[tuple] = []
-
-    for pidx, proj in enumerate(projects):
-        remap: dict[int, int] = {}
-        for cls in proj.classes:
-            remap[cls.id] = name_to_uid[cls.name]
-
+    # ── .annotatex project ────────────────────────────────────────────────────
+    if path.is_file():
+        from app.project import Project
+        proj = Project.load(str(path))
+        entries = []
         for fn in proj.images:
             src = proj.image_path(fn)
             if not os.path.exists(src):
                 continue
             ia = proj.annotations.get(fn)
-            boxes = []
-            if ia:
-                for b in ia.boxes:
-                    nb = copy.deepcopy(b)
-                    nb.class_id = remap.get(b.class_id, b.class_id)
-                    boxes.append(nb)
-            stem = f"p{pidx}_{Path(fn).stem}"
-            suffix = Path(fn).suffix.lower() or ".jpg"
-            all_entries.append((src, boxes, stem, suffix))
+            boxes = [_copy.deepcopy(b) for b in ia.boxes] if ia else []
+            entries.append((src, boxes, f"{prefix}_{Path(fn).stem}", Path(fn).suffix.lower() or ".jpg"))
+        return entries, [c.name for c in proj.classes]
 
+    # ── YOLO dataset directory ────────────────────────────────────────────────
+    if path.is_dir():
+        # Resolve class names from classes.txt or data.yaml, checking path then parent
+        class_names: list[str] = []
+        for search_root in (path, path.parent):
+            if (search_root / "classes.txt").exists():
+                class_names = [
+                    ln.strip()
+                    for ln in (search_root / "classes.txt").read_text(encoding="utf-8").splitlines()
+                    if ln.strip()
+                ]
+                break
+            if (search_root / "data.yaml").exists():
+                try:
+                    import yaml as _yaml
+                    data = _yaml.safe_load((search_root / "data.yaml").read_text(encoding="utf-8"))
+                    names = data.get("names", [])
+                    class_names = list(names.values()) if isinstance(names, dict) else list(names)
+                except Exception:
+                    pass
+                if class_names:
+                    break
+
+        def _has_img_files(d: Path) -> bool:
+            return d.is_dir() and any(
+                p.suffix.lower() in _YOLO_IMAGE_EXTS for p in d.iterdir() if p.is_file()
+            )
+
+        # Build list of (img_dir, lbl_dir) pairs covering all common YOLO layouts:
+        #   Layout 1: path/train/images/ + path/train/labels/  (standard split export)
+        #   Layout 2: path/images/                             (flat export)
+        #   Layout 3: path/images/train/ + path/labels/train/  (shared images/ root)
+        #   Layout 4: path/train/ + path.parent/labels/train/  (user selected images/ dir)
+        scan_pairs: list[tuple[Path, Path]] = []
+
+        # Layout 1
+        for sp in ("train", "val", "test"):
+            if (path / sp / "images").is_dir():
+                scan_pairs.append((path / sp / "images", path / sp / "labels"))
+
+        if not scan_pairs:
+            img_root = path / "images"
+            if img_root.is_dir():
+                if _has_img_files(img_root):
+                    # Layout 2: flat images directly in images/
+                    scan_pairs.append((img_root, path / "labels"))
+                else:
+                    # Layout 3: images/train/, images/val/ with labels at labels/train/ etc.
+                    for sp in ("train", "val", "test"):
+                        if (img_root / sp).is_dir():
+                            scan_pairs.append((img_root / sp, path / "labels" / sp))
+
+        if not scan_pairs:
+            # Layout 4: path itself IS the images/ dir containing split subdirs
+            for sp in ("train", "val", "test"):
+                if _has_img_files(path / sp):
+                    parent_lbl = path.parent / "labels" / sp
+                    lbl = parent_lbl if parent_lbl.is_dir() else path / sp
+                    scan_pairs.append((path / sp, lbl))
+
+        seen: set[str] = set()
+        entries = []
+        for img_dir, lbl_dir in scan_pairs:
+            for img_file in sorted(img_dir.iterdir()):
+                if img_file.suffix.lower() not in _YOLO_IMAGE_EXTS:
+                    continue
+                if img_file.stem in seen:
+                    continue
+                seen.add(img_file.stem)
+
+                boxes = []
+                lbl_file = lbl_dir / (img_file.stem + ".txt")
+                if lbl_file.exists():
+                    for line in lbl_file.read_text(encoding="utf-8").splitlines():
+                        parts = line.strip().split()
+                        if len(parts) == 5:
+                            try:
+                                boxes.append(BoundingBox(
+                                    class_id=int(parts[0]),
+                                    cx=float(parts[1]), cy=float(parts[2]),
+                                    w=float(parts[3]), h=float(parts[4]),
+                                ))
+                            except ValueError:
+                                pass
+
+                entries.append((str(img_file), boxes, f"{prefix}_{img_file.stem}", img_file.suffix.lower() or ".jpg"))
+
+        # If no class file found, synthesise names from max class id
+        if not class_names and entries:
+            max_id = max(
+                (b.class_id for _, boxes, _, _ in entries for b in boxes),
+                default=-1,
+            )
+            class_names = [f"class_{i}" for i in range(max_id + 1)]
+
+        return entries, class_names
+
+    raise ValueError(f"Source not found or unrecognised type: {source_path}")
+
+
+def batch_export_yolo(sources: list[str], output_dir: str,
+                      split: Optional[dict] = None,
+                      generate_yaml: bool = True,
+                      aug_cfg=None,
+                      progress_cb=None,
+                      cancel_event=None) -> dict:
+    import copy
+
+    output_dir = Path(output_dir)
+
+    # ── Load all sources and build unified class list ─────────────────────────
+    unified_names: list[str] = []
+    name_to_uid: dict[str, int] = {}
+    source_data: list[tuple[list, list[str]]] = []
+
+    for idx, src_path in enumerate(sources):
+        entries, class_names = _load_source_entries(src_path, idx)
+        source_data.append((entries, class_names))
+        for name in class_names:
+            if name not in name_to_uid:
+                name_to_uid[name] = len(unified_names)
+                unified_names.append(name)
+
+    # ── Remap per-source class IDs → unified IDs ──────────────────────────────
+    all_entries: list[tuple] = []
+    for entries, class_names in source_data:
+        local_to_uid = {i: name_to_uid[n] for i, n in enumerate(class_names) if n in name_to_uid}
+        for src, boxes, stem, suffix in entries:
+            remapped = []
+            for b in boxes:
+                nb = copy.copy(b)
+                nb.class_id = local_to_uid.get(b.class_id, b.class_id)
+                remapped.append(nb)
+            all_entries.append((src, remapped, stem, suffix))
+
+    # ── Split ─────────────────────────────────────────────────────────────────
     if split:
         splits = list(split.keys())
         ratios = list(split.values())
@@ -241,7 +360,7 @@ def batch_export_yolo(project_paths: list[str], output_dir: str,
     from PIL import Image as PILImage
 
     stats = {"images": 0, "augmented": 0, "annotations": 0,
-             "classes": len(unified_names), "projects": len(projects)}
+             "classes": len(unified_names), "projects": len(sources)}
 
     total_entries = len(all_entries)
     done = 0
@@ -258,6 +377,8 @@ def batch_export_yolo(project_paths: list[str], output_dir: str,
         lbl_out.mkdir(parents=True, exist_ok=True)
 
         for src, boxes, stem, suffix in entries:
+            if cancel_event and cancel_event.is_set():
+                raise InterruptedError("Cancelled")
             if progress_cb:
                 progress_cb(done, total_entries)
             done += 1
@@ -306,7 +427,7 @@ def batch_export_yolo(project_paths: list[str], output_dir: str,
         yaml_path = output_dir / "data.yaml"
         with open(yaml_path, "w") as f:
             f.write(f"path: {output_dir.resolve()}\n")
-            for sp in splits:
+            for sp in list(split.keys()):
                 f.write(f"{sp}: {sp}/images\n")
             f.write(f"\nnc: {len(unified_names)}\n")
             f.write(f"names: {unified_names}\n")

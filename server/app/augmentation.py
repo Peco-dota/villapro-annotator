@@ -257,67 +257,58 @@ def _write_label(path: Path, boxes: list["BoundingBox"]):
 
 # ── Folder-based augmentation (post-export in-place) ─────────────────────────
 
-def augment_from_folder(folder: str, cfg: AugConfig, progress_cb=None) -> dict:
-    """
-    Augment all images in <folder>/images/ using paired labels from <folder>/labels/.
-    Augmented copies are written back into the same images/ and labels/ directories
-    alongside the originals. Files whose stem already contains '_aug' are skipped so
-    re-running this function on the same folder is safe.
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
 
-    Returns stats dict: {"original": N, "augmented": N, "skipped": N}
+
+def _has_images(d: Path) -> bool:
+    return d.is_dir() and any(p.suffix.lower() in _IMAGE_EXTS for p in d.iterdir() if p.is_file())
+
+
+def _augment_bare_split(img_dir: Path, lbl_dir: Path, cfg: AugConfig,
+                        on_image=None, cancel_event=None) -> dict:
+    """
+    Augment images that live directly in img_dir, with labels in lbl_dir.
+    on_image() is called once per original image (including skipped ones) for progress tracking.
+    Skips files whose stem already contains '_aug' so re-running is safe.
     """
     from app.annotation import BoundingBox
 
-    folder = Path(folder)
-    img_dir = folder / "images"
-    lbl_dir = folder / "labels"
+    lbl_dir.mkdir(parents=True, exist_ok=True)
 
-    if not img_dir.exists():
-        raise FileNotFoundError(f"No 'images' subfolder found in {folder}")
-    lbl_dir.mkdir(exist_ok=True)
-
-    IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
-    # Only process originals — skip files that are already augmented copies.
     image_files = sorted(
         p for p in img_dir.iterdir()
-        if p.suffix.lower() in IMAGE_EXTS and "_aug" not in p.stem
+        if p.suffix.lower() in _IMAGE_EXTS and "_aug" not in p.stem
     )
 
     stats = {"original": len(image_files), "augmented": 0, "skipped": 0}
     rng = random.Random(42)
-    total = len(image_files)
 
-    for i, img_path in enumerate(image_files):
-        if progress_cb:
-            progress_cb(i, total)
-
-        # Parse the paired YOLO label file
+    for img_path in image_files:
         lbl_path = lbl_dir / (img_path.stem + ".txt")
         boxes: list[BoundingBox] = []
         if lbl_path.exists():
-            with open(lbl_path) as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if len(parts) == 5:
-                        try:
-                            boxes.append(BoundingBox(
-                                class_id=int(parts[0]),
-                                cx=float(parts[1]),
-                                cy=float(parts[2]),
-                                w=float(parts[3]),
-                                h=float(parts[4]),
-                            ))
-                        except ValueError:
-                            pass
+            for line in lbl_path.read_text(encoding="utf-8").splitlines():
+                parts = line.strip().split()
+                if len(parts) == 5:
+                    try:
+                        boxes.append(BoundingBox(
+                            class_id=int(parts[0]),
+                            cx=float(parts[1]), cy=float(parts[2]),
+                            w=float(parts[3]), h=float(parts[4]),
+                        ))
+                    except ValueError:
+                        pass
 
         if cfg.only_annotated and not boxes:
             stats["skipped"] += 1
+            if on_image: on_image()
             continue
 
         try:
             img = Image.open(img_path).convert("RGB")
         except Exception:
             stats["skipped"] += 1
+            if on_image: on_image()
             continue
 
         suffix = img_path.suffix.lower()
@@ -328,7 +319,101 @@ def augment_from_folder(folder: str, cfg: AugConfig, progress_cb=None) -> dict:
             _write_label(lbl_dir / (aug_stem + ".txt"), aug_boxes)
             stats["augmented"] += 1
 
-    if progress_cb:
-        progress_cb(total, total)
+        if on_image: on_image()
+        if cancel_event and cancel_event.is_set():
+            raise InterruptedError("Cancelled")
 
     return stats
+
+
+def _augment_single_split(split_dir: Path, cfg: AugConfig, on_image=None, cancel_event=None) -> dict:
+    """Augment a split whose images are in split_dir/images/ and labels in split_dir/labels/."""
+    return _augment_bare_split(split_dir / "images", split_dir / "labels", cfg,
+                               on_image=on_image, cancel_event=cancel_event)
+
+
+def _resolve_scan_pairs(folder: Path) -> list[tuple[Path, Path]]:
+    """Detect dataset layout and return list of (img_dir, lbl_dir) pairs to augment."""
+    pairs: list[tuple[Path, Path]] = []
+
+    # Layout 1: folder/train/images/ (standard split export)
+    for sp in ("train", "val", "test"):
+        if (folder / sp / "images").is_dir():
+            pairs.append((folder / sp / "images", folder / sp / "labels"))
+    if pairs:
+        return pairs
+
+    # Layout 2: folder/images/ with direct image files (flat export)
+    if _has_images(folder / "images"):
+        return [(folder / "images", folder / "labels")]
+
+    # Layout 3: folder/images/train/ (shared images/ root with split subdirs)
+    img_root = folder / "images"
+    if img_root.is_dir():
+        for sp in ("train", "val", "test"):
+            if _has_images(img_root / sp):
+                pairs.append((img_root / sp, folder / "labels" / sp))
+        if pairs:
+            return pairs
+
+    # Layout 4: folder/train/ etc. with images directly (user selected images/ dir)
+    for sp in ("train", "val", "test"):
+        if _has_images(folder / sp):
+            parent_lbl = folder.parent / "labels" / sp
+            lbl = parent_lbl if parent_lbl.is_dir() else folder / sp
+            pairs.append((folder / sp, lbl))
+
+    return pairs
+
+
+def augment_from_folder(folder: str, cfg: AugConfig, progress_cb=None, cancel_event=None) -> dict:
+    """
+    Augment an exported YOLO dataset in place. Auto-detects four common layouts:
+
+    Layout 1 — standard split:   folder/train/images/  folder/val/images/  ...
+    Layout 2 — flat:             folder/images/  (images directly inside)
+    Layout 3 — shared images/:   folder/images/train/  folder/images/val/  ...
+                                  folder/labels/train/  folder/labels/val/  ...
+    Layout 4 — user inside img:  folder/train/  folder/val/  ...  (user selected images/ dir)
+                                  sibling labels/ found at folder.parent/labels/
+
+    progress_cb(done, total) is called as images are processed.
+    Augmented copies are written alongside originals. Re-running is safe.
+    Returns aggregated stats: {"original": N, "augmented": N, "skipped": N}
+    """
+    folder = Path(folder)
+    pairs = _resolve_scan_pairs(folder)
+
+    if not pairs:
+        raise FileNotFoundError(
+            f"No recognised dataset structure in '{folder}'. "
+            "Expected one of: 'train/images/', 'images/' with direct images, "
+            "or 'images/train/' layout."
+        )
+
+    # Count originals upfront for accurate progress reporting
+    total_images = sum(
+        sum(1 for p in img_dir.iterdir()
+            if p.suffix.lower() in _IMAGE_EXTS and "_aug" not in p.stem)
+        for img_dir, _ in pairs if img_dir.is_dir()
+    )
+
+    done = [0]
+    if progress_cb:
+        progress_cb(0, total_images)
+
+    def _on_image():
+        done[0] += 1
+        if progress_cb:
+            progress_cb(done[0], total_images)
+
+    result: dict[str, int] = {"original": 0, "augmented": 0, "skipped": 0}
+    for img_dir, lbl_dir in pairs:
+        s = _augment_bare_split(img_dir, lbl_dir, cfg, on_image=_on_image, cancel_event=cancel_event)
+        for k in result:
+            result[k] += s.get(k, 0)
+
+    if progress_cb:
+        progress_cb(total_images, total_images)
+
+    return result

@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import {
   getMjpegStreamUrl, getVideoState,
-  videoPause, videoSpeed, videoSeek, videoStep,
+  videoPause, videoSpeed, videoSeek, videoSeekTo, videoStep,
   sseUrl, api,
 } from '../lib/api'
 import { Button } from '../components/ui/Button'
@@ -55,10 +55,11 @@ function VideoControls({ name }: { name: string }) {
     refetchInterval: 500,
   })
 
-  const pauseMut = useMutation({ mutationFn: () => videoPause(name), onSuccess: () => refetch() })
-  const speedMut = useMutation({ mutationFn: (s: number) => videoSpeed(name, s), onSuccess: () => refetch() })
-  const seekMut  = useMutation({ mutationFn: (d: number) => videoSeek(name, d),  onSuccess: () => refetch() })
-  const stepMut  = useMutation({ mutationFn: () => videoStep(name) })
+  const pauseMut  = useMutation({ mutationFn: () => videoPause(name), onSuccess: () => refetch() })
+  const speedMut  = useMutation({ mutationFn: (s: number) => videoSpeed(name, s), onSuccess: () => refetch() })
+  const seekMut   = useMutation({ mutationFn: (d: number) => videoSeek(name, d),  onSuccess: () => refetch() })
+  const seekToMut = useMutation({ mutationFn: (ms: number) => videoSeekTo(name, ms), onSuccess: () => refetch() })
+  const stepMut   = useMutation({ mutationFn: () => videoStep(name) })
 
   const fmtTime = (ms: number) => {
     const s = Math.floor(ms / 1000)
@@ -78,7 +79,7 @@ function VideoControls({ name }: { name: string }) {
           <div className="flex-1 h-2 bg-slate-700 rounded-full cursor-pointer"
             onClick={e => {
               const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
-              seekMut.mutate((e.clientX - rect.left) / rect.width * dur - pos)
+              seekToMut.mutate((e.clientX - rect.left) / rect.width * dur)
             }}
           >
             <div className="h-full bg-violet-500 rounded-full transition-all" style={{ width: `${dur > 0 ? (pos / dur) * 100 : 0}%` }} />
@@ -87,15 +88,15 @@ function VideoControls({ name }: { name: string }) {
         </div>
       )}
       <div className="flex items-center gap-2 flex-wrap">
-        <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-pos)} title="Go to start">⏮</Button>
-        <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-15000)}>-15s</Button>
-        <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-5000)}>-5s</Button>
+        <Button size="sm" variant="ghost" onClick={() => seekToMut.mutate(0)} title="Go to start">⏮</Button>
+        <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-15)}>-15s</Button>
+        <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-5)}>-5s</Button>
         <Button size="sm" variant="ghost" onClick={() => pauseMut.mutate()} disabled={pauseMut.isPending}>
           {paused ? '▶' : '⏸'}
         </Button>
         {paused && <Button size="sm" variant="ghost" onClick={() => stepMut.mutate()} title="Step one frame">⏭</Button>}
-        <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(5000)}>+5s</Button>
-        <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(15000)}>+15s</Button>
+        <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(5)}>+5s</Button>
+        <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(15)}>+15s</Button>
         <div className="flex items-center gap-1.5 ml-2">
           {SPEEDS.map(s => (
             <button key={s} onClick={() => speedMut.mutate(s)}

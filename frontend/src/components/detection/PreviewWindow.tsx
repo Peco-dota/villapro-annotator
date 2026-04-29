@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import {
   getMjpegStreamUrl, getVideoState,
-  videoPause, videoSpeed, videoSeek, videoStep,
+  videoPause, videoSpeed, videoSeek, videoSeekTo, videoStep,
 } from '../../lib/api'
 import type { ServiceConfig } from '../../lib/types'
 import { Button } from '../ui/Button'
@@ -36,6 +36,10 @@ export function PreviewWindow({ service, onClose }: Props) {
   })
   const seekMut = useMutation({
     mutationFn: (delta: number) => videoSeek(service.name, delta),
+    onSuccess: () => refetchVideo(),
+  })
+  const seekToMut = useMutation({
+    mutationFn: (ms: number) => videoSeekTo(service.name, ms),
     onSuccess: () => refetchVideo(),
   })
   const stepMut = useMutation({
@@ -84,7 +88,7 @@ export function PreviewWindow({ service, onClose }: Props) {
                 onClick={e => {
                   const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
                   const pct = (e.clientX - rect.left) / rect.width
-                  seekMut.mutate(pct * dur - pos)
+                  seekToMut.mutate(pct * dur)
                 }}
               >
                 <div className="h-full bg-violet-500 rounded-full" style={{ width: `${dur > 0 ? (pos / dur) * 100 : 0}%` }} />
@@ -96,9 +100,9 @@ export function PreviewWindow({ service, onClose }: Props) {
           {/* Controls row */}
           <div className="flex items-center gap-2 flex-wrap">
             {/* Seek buttons */}
-            <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-pos)} title="Go to start">⏮</Button>
-            <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-15000)} title="-15s">-15s</Button>
-            <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-5000)} title="-5s">-5s</Button>
+            <Button size="sm" variant="ghost" onClick={() => seekToMut.mutate(0)} title="Go to start">⏮</Button>
+            <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-15)} title="-15s">-15s</Button>
+            <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-5)} title="-5s">-5s</Button>
 
             {/* Pause/Play */}
             <Button size="sm" variant="ghost" onClick={() => pauseMut.mutate()} disabled={pauseMut.isPending}>
@@ -110,8 +114,8 @@ export function PreviewWindow({ service, onClose }: Props) {
               <Button size="sm" variant="ghost" onClick={() => stepMut.mutate()} title="Step one frame">⏭</Button>
             )}
 
-            <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(5000)} title="+5s">+5s</Button>
-            <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(15000)} title="+15s">+15s</Button>
+            <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(5)} title="+5s">+5s</Button>
+            <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(15)} title="+15s">+15s</Button>
 
             {/* Speed */}
             <div className="flex items-center gap-1 ml-2">

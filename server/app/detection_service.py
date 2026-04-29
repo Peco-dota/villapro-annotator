@@ -912,7 +912,7 @@ class DetectionService:
                             self._preview_queue.put_nowait(_frame)
                         except queue.Full:
                             pass
-                        _notify_mjpeg_frame(self._name, _frame)
+                        _notify_mjpeg_frame(cfg.name, _frame)
                 except Exception as e:
                     self._append_log(LogEntry.from_error(str(e)))
                 finally:
@@ -1113,7 +1113,7 @@ class DetectionService:
                             self._preview_queue.put_nowait(_frame)
                         except queue.Full:
                             pass
-                        _notify_mjpeg_frame(self._name, _frame)
+                        _notify_mjpeg_frame(cfg.name, _frame)
                 except Exception as e:
                     self._append_log(LogEntry.from_error(str(e)))
                 finally:

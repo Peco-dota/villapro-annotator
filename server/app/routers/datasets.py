@@ -34,6 +34,13 @@ _train_threads: dict[str, threading.Thread] = {}
 # Active training job (persisted so clients can reconnect after refresh)
 _active_train_job: dict = {}  # {job_id, run_name, epochs, started_at} or {}
 
+# Active augmentation / merge jobs (persisted so clients can reconnect after navigation)
+_active_aug_job: dict = {}
+_active_merge_job: dict = {}
+
+# Cancel events for cancellable jobs (augment, batch export)
+_job_cancel: dict[str, threading.Event] = {}
+
 
 def _raise_in_thread(tid: int, exc_type: type) -> bool:
     """Raise an exception in a thread by its OS id. Returns True on success."""
@@ -47,7 +54,8 @@ def _raise_in_thread(tid: int, exc_type: type) -> bool:
 
 def _new_job() -> str:
     job_id = str(uuid.uuid4())
-    _jobs[job_id] = {"status": "running", "result": None, "error": None, "epoch": 0, "total_epochs": 0}
+    _jobs[job_id] = {"status": "running", "result": None, "error": None,
+                     "epoch": 0, "total_epochs": 0, "progress": 0, "total": 0}
     return job_id
 
 
@@ -65,6 +73,36 @@ def get_job(job_id: str, _user: dict = Depends(require_user)):
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found.")
     return {"job_id": job_id, **job}
+
+
+@router.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str, _user: dict = Depends(require_user)):
+    if job_id not in _jobs:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if _jobs[job_id].get("status") != "running":
+        raise HTTPException(status_code=409, detail="Job is not running.")
+    event = _job_cancel.get(job_id)
+    if event:
+        event.set()
+    return {"cancelled": job_id}
+
+
+@router.get("/augment/active")
+def get_active_aug(_user: dict = Depends(require_user)):
+    if not _active_aug_job:
+        return {"active": False}
+    job_id = _active_aug_job.get("job_id")
+    job = _jobs.get(job_id, {})
+    return {"active": True, **_active_aug_job, **job}
+
+
+@router.get("/merge/active")
+def get_active_merge(_user: dict = Depends(require_user)):
+    if not _active_merge_job:
+        return {"active": False}
+    job_id = _active_merge_job.get("job_id")
+    job = _jobs.get(job_id, {})
+    return {"active": True, **_active_merge_job, **job}
 
 
 # ── YOLO Export ───────────────────────────────────────────────────────────────
@@ -120,33 +158,49 @@ def export_coco_endpoint(req: ExportCocoRequest, background_tasks: BackgroundTas
 # ── Batch (multi-project) YOLO Export ────────────────────────────────────────
 
 class BatchExportRequest(BaseModel):
-    project_paths: list[str]
+    sources: list[str]            # .annotatex project files OR YOLO dataset directories
     output_dir: str
     split: Optional[dict] = None
     generate_yaml: bool = True
-    augmentation: Optional[dict] = None  # AugConfig fields as dict, or null
+    augmentation: Optional[dict] = None
 
 
 @router.post("/export/batch")
 def batch_export_endpoint(req: BatchExportRequest, background_tasks: BackgroundTasks,
                           _user: dict = Depends(require_user)):
-    for path in req.project_paths:
-        if not os.path.isfile(path):
-            raise HTTPException(status_code=400, detail=f"Project not found: {path}")
+    for src in req.sources:
+        if not os.path.exists(src):
+            raise HTTPException(status_code=400, detail=f"Source not found: {src}")
 
     aug_cfg = None
     if req.augmentation:
         aug_cfg = AugConfig(**req.augmentation)
 
     job_id = _new_job()
+    cancel_event = threading.Event()
+    _job_cancel[job_id] = cancel_event
+
+    _active_merge_job.clear()
+    _active_merge_job.update({
+        "job_id": job_id,
+        "sources": req.sources,
+        "output_dir": req.output_dir,
+        "started_at": datetime.datetime.now().isoformat(),
+    })
 
     def _run():
+        def progress_cb(done: int, total: int):
+            _jobs[job_id]["progress"] = done
+            _jobs[job_id]["total"] = total
         try:
             stats = batch_export_yolo(
-                req.project_paths, req.output_dir,
+                req.sources, req.output_dir,
                 req.split, req.generate_yaml, aug_cfg,
+                progress_cb=progress_cb, cancel_event=cancel_event,
             )
             _job_done(job_id, stats)
+        except InterruptedError:
+            _job_failed(job_id, "Cancelled")
         except Exception as e:
             _job_failed(job_id, str(e))
 
@@ -274,11 +328,26 @@ def augment_folder_endpoint(req: AugmentFolderRequest, background_tasks: Backgro
 
     cfg = _build_aug_config(req)
     job_id = _new_job()
+    cancel_event = threading.Event()
+    _job_cancel[job_id] = cancel_event
+
+    _active_aug_job.clear()
+    _active_aug_job.update({
+        "job_id": job_id,
+        "folder": req.folder,
+        "started_at": datetime.datetime.now().isoformat(),
+    })
 
     def _run():
+        def progress_cb(done: int, total: int):
+            _jobs[job_id]["progress"] = done
+            _jobs[job_id]["total"] = total
         try:
-            stats = augment_from_folder(req.folder, cfg)
+            stats = augment_from_folder(req.folder, cfg, progress_cb=progress_cb,
+                                        cancel_event=cancel_event)
             _job_done(job_id, stats)
+        except InterruptedError:
+            _job_failed(job_id, "Cancelled")
         except Exception as e:
             _job_failed(job_id, str(e))
 

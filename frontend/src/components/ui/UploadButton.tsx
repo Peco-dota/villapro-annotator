@@ -52,7 +52,7 @@ export function UploadButton({ filter = 'any', destDir, onUploaded }: Props) {
   const uploading = progress !== null
 
   return (
-    <div className="relative">
+    <div className="relative flex items-stretch">
       <input
         ref={inputRef}
         type="file"

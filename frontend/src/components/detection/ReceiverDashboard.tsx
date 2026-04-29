@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { sseUrl, api, clearAllResults } from '../../lib/api'
+import { sseUrl, api, clearAllResults, getServices } from '../../lib/api'
 
 interface DetectionPayload {
   service_name: string
@@ -37,8 +37,7 @@ function dirLabel(d: string | undefined, conf: number | undefined, detected: boo
   )
 }
 
-function ServicePanel({ data }: { data: ServiceResults }) {
-  const isLive = Date.now() - data.lastSeen < 5000
+function ServicePanel({ data, isRunning }: { data: ServiceResults; isRunning: boolean }) {
   const lastDir = data.results[0]?.car?.direction
   const hasResults = data.results.length > 0
 
@@ -48,9 +47,9 @@ function ServicePanel({ data }: { data: ServiceResults }) {
       <div className="flex items-center justify-between px-4 py-3 border-b border-[#1e293b]">
         <span className="text-sm font-bold text-violet-300">{data.name}</span>
         <div className="flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${isLive ? 'bg-green-400 animate-pulse' : 'bg-slate-600'}`} />
+          <div className={`w-2 h-2 rounded-full ${isRunning ? 'bg-green-400 animate-pulse' : 'bg-slate-600'}`} />
           <span className="text-xs text-slate-500">
-            {isLive
+            {isRunning
               ? `Live · ${new Date(data.lastSeen).toLocaleTimeString()}`
               : hasResults
                 ? `Last: ${new Date(data.lastSeen).toLocaleTimeString()}`
@@ -131,6 +130,7 @@ function ServicePanel({ data }: { data: ServiceResults }) {
 
 export function ReceiverDashboard() {
   const [panels, setPanels] = useState<Record<string, ServiceResults>>({})
+  const [runningSet, setRunningSet] = useState<Set<string>>(new Set())
   const esRefs = useRef<Map<string, EventSource>>(new Map())
 
   // Subscribe to all services via SSE + poll buffered results on mount
@@ -184,6 +184,18 @@ export function ReceiverDashboard() {
     }
   }
 
+  // Poll running service status — drives the live indicator
+  useEffect(() => {
+    const update = () => {
+      getServices().then((svcs: { name: string; running: boolean }[]) => {
+        setRunningSet(new Set(svcs.filter(s => s.running).map(s => s.name)))
+      }).catch(() => {})
+    }
+    update()
+    const id = setInterval(update, 3000)
+    return () => clearInterval(id)
+  }, [])
+
   // Poll /results/all every 2s — discovers new services AND refreshes panel data
   useEffect(() => {
     const id = setInterval(() => {
@@ -202,7 +214,7 @@ export function ReceiverDashboard() {
               next[name] = {
                 name,
                 results,
-                lastSeen: Date.now(),
+                lastSeen: existing?.lastSeen ?? 0,
                 totalReports: Math.max(existing?.totalReports ?? 0, results.length),
                 carCount: results.filter(r => r.car?.detected).length,
                 rearCount: results.filter(r => r.car_rear?.detected).length,
@@ -239,7 +251,7 @@ export function ReceiverDashboard() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${panelList.some(p => Date.now() - p.lastSeen < 5000) ? 'bg-green-400 animate-pulse' : 'bg-slate-600'}`} />
+          <div className={`w-2 h-2 rounded-full ${panelList.some(p => runningSet.has(p.name)) ? 'bg-green-400 animate-pulse' : 'bg-slate-600'}`} />
           <span className="text-xs text-slate-500">{panelList.length} service{panelList.length !== 1 ? 's' : ''}</span>
           {panelList.length > 0 && (
             <button
@@ -264,7 +276,7 @@ export function ReceiverDashboard() {
       ) : (
         <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(480px, 1fr))' }}>
           {panelList.map(data => (
-            <ServicePanel key={data.name} data={data} />
+            <ServicePanel key={data.name} data={data} isRunning={runningSet.has(data.name)} />
           ))}
         </div>
       )}

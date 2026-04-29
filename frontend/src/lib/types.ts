@@ -110,6 +110,8 @@ export interface JobStatus {
   status: 'running' | 'done' | 'failed'
   result: Record<string, unknown> | null
   error: string | null
+  progress?: number
+  total?: number
 }
 
 export interface Token {

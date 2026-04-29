@@ -227,13 +227,22 @@ export const fsMkdir = (parent: string, name: string): Promise<{ path: string }>
 // ── Datasets ──────────────────────────────────────────────────────────────────
 export const exportYolo = (data: object) => api.post('/api/datasets/export/yolo', data).then(r => r.data)
 export const exportCoco = (data: object) => api.post('/api/datasets/export/coco', data).then(r => r.data)
-export const exportBatch = (data: object) => api.post('/api/datasets/export/batch', data).then(r => r.data)
+export const exportBatch = (data: {
+  sources: string[]
+  output_dir: string
+  split?: { train: number; val: number; test: number }
+  generate_yaml?: boolean
+  augmentation?: object | null
+}) => api.post('/api/datasets/export/batch', data).then(r => r.data)
 export const augmentProject = (data: object) => api.post('/api/datasets/augment/project', data).then(r => r.data)
 export const trainModel = (data: object) => api.post('/api/datasets/train', data).then(r => r.data)
 export const cancelTrain = (force = false) => api.post('/api/datasets/train/cancel', null, { params: { force } }).then(r => r.data)
 export const getActiveTrain = () => api.get('/api/datasets/train/active').then(r => r.data)
 export const trainLogUrl = (jobId: string): string => sseUrl(`/api/datasets/train/log/${jobId}`)
 export const getJob = (job_id: string) => api.get(`/api/datasets/jobs/${job_id}`).then(r => r.data)
+export const cancelJob = (job_id: string) => api.post(`/api/datasets/jobs/${job_id}/cancel`).then(r => r.data)
+export const getActiveAugJob = () => api.get('/api/datasets/augment/active').then(r => r.data)
+export const getActiveMergeJob = () => api.get('/api/datasets/merge/active').then(r => r.data)
 
 export interface TrainHistoryEntry {
   job_id: string

@@ -1,0 +1,30 @@
+[
+  {
+    "name": "test01",
+    "model_path": "/villapro-data/models/ultimate_best_yolo26n.pt",
+    "input_host": "0.0.0.0",
+    "input_port": 5050,
+    "output_host": "127.0.0.1",
+    "output_port": 6060,
+    "input_mode": "video",
+    "auto_start": false,
+    "rtsp_enabled": false,
+    "rtsp_user": "admin",
+    "rtsp_password": "",
+    "rtsp_ip": "192.168.1.1",
+    "rtsp_port": 554,
+    "rtsp_channel": "Streaming/Channels/102",
+    "rtsp_interval": 0.25,
+    "video_path": "/villapro-data/recordings/gate1_ultimate_states_only/gate1_ultimate_states_only_20260420_113333.mp4",
+    "video_loop": true,
+    "conf_threshold": 0.6,
+    "strict_output": false,
+    "state_changes_only": true,
+    "dataset_capture": false,
+    "dataset_interval": 10,
+    "dataset_dir": "",
+    "record_stream": false,
+    "record_dir": "",
+    "gate_area_threshold": 400000.0
+  }
+]

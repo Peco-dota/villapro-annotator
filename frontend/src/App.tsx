@@ -7,6 +7,7 @@ import { AnnotatePage } from './pages/AnnotatePage'
 import { DetectionPage } from './pages/DetectionPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { PreviewPage } from './pages/PreviewPage'
+import { ReceiverPage } from './pages/ReceiverPage'
 
 const qc = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 5000 } },
@@ -27,6 +28,7 @@ export default function App() {
           <Route path="/detection" element={<RequireAuth><DetectionPage /></RequireAuth>} />
           <Route path="/settings" element={<RequireAuth><SettingsPage /></RequireAuth>} />
           <Route path="/preview" element={<RequireAuth><PreviewPage /></RequireAuth>} />
+          <Route path="/receiver" element={<RequireAuth><ReceiverPage /></RequireAuth>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>

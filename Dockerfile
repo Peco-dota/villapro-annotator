@@ -51,7 +51,8 @@ COPY server/ ./
 COPY --from=frontend-build /build/frontend/dist ./static
 
 # Data directory — will be mounted as a volume so data persists
-RUN mkdir -p /data/projects /data/models /data/config /data/recordings /data/debug /data/datasets
+RUN mkdir -p /villapro-data/projects /villapro-data/models /villapro-data/config \
+             /villapro-data/recordings /villapro-data/debug /villapro-data/datasets
 
 # Default environment — override in docker-compose or with -e flags
 ENV VISIONQ_DATA=/villapro-data
@@ -59,4 +60,4 @@ ENV VISIONQ_SECRET=change-me-in-production
 
 EXPOSE 8000
 
-CMD ["python3", "main.py", "-c", "/data/config/visionq.json", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python3", "main.py", "--host", "0.0.0.0", "--port", "8000"]
