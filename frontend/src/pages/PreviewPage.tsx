@@ -71,32 +71,55 @@ function VideoControls({ name }: { name: string }) {
   const paused = videoState?.paused ?? false
   const speed = videoState?.speed ?? 1
 
+  const [hoverPct, setHoverPct] = useState<number | null>(null)
+  const getPct = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+  }
+
   return (
     <div className="px-4 py-3 border-t border-[#1e293b] flex flex-col gap-3 bg-[#0f172a]">
       {dur > 0 && (
         <div className="flex items-center gap-3 text-sm text-slate-400">
           <span className="w-12 text-right shrink-0 font-mono">{fmtTime(pos)}</span>
-          <div className="flex-1 h-2 bg-slate-700 rounded-full cursor-pointer"
-            onClick={e => {
-              const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
-              seekToMut.mutate((e.clientX - rect.left) / rect.width * dur)
-            }}
+          <div
+            className="flex-1 h-2 bg-slate-700 rounded-full relative cursor-pointer"
+            onClick={e => seekToMut.mutate(getPct(e) * dur)}
+            onMouseMove={e => setHoverPct(getPct(e))}
+            onMouseLeave={() => setHoverPct(null)}
           >
-            <div className="h-full bg-violet-500 rounded-full transition-all" style={{ width: `${dur > 0 ? (pos / dur) * 100 : 0}%` }} />
+            <div className="h-full bg-violet-500 rounded-full transition-all" style={{ width: `${(pos / dur) * 100}%` }} />
+            {hoverPct !== null && (
+              <>
+                <div
+                  className="absolute top-0 bottom-0 w-0.5 bg-white/60 rounded-full pointer-events-none"
+                  style={{ left: `${hoverPct * 100}%`, transform: 'translateX(-50%)' }}
+                />
+                <div
+                  className="absolute -top-8 bg-slate-800 border border-slate-600 text-white text-xs font-mono px-2 py-0.5 rounded pointer-events-none whitespace-nowrap"
+                  style={{
+                    left: `${hoverPct * 100}%`,
+                    transform: `translateX(${hoverPct < 0.08 ? '0%' : hoverPct > 0.92 ? '-100%' : '-50%'})`,
+                  }}
+                >
+                  {fmtTime(hoverPct * dur)}
+                </div>
+              </>
+            )}
           </div>
           <span className="w-12 shrink-0 font-mono">{fmtTime(dur)}</span>
         </div>
       )}
       <div className="flex items-center gap-2 flex-wrap">
         <Button size="sm" variant="ghost" onClick={() => seekToMut.mutate(0)} title="Go to start">⏮</Button>
-        <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-15)}>-15s</Button>
-        <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-5)}>-5s</Button>
+        <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-15000)}>-15s</Button>
+        <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-5000)}>-5s</Button>
         <Button size="sm" variant="ghost" onClick={() => pauseMut.mutate()} disabled={pauseMut.isPending}>
           {paused ? '▶' : '⏸'}
         </Button>
         {paused && <Button size="sm" variant="ghost" onClick={() => stepMut.mutate()} title="Step one frame">⏭</Button>}
-        <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(5)}>+5s</Button>
-        <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(15)}>+15s</Button>
+        <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(5000)}>+5s</Button>
+        <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(15000)}>+15s</Button>
         <div className="flex items-center gap-1.5 ml-2">
           {SPEEDS.map(s => (
             <button key={s} onClick={() => speedMut.mutate(s)}

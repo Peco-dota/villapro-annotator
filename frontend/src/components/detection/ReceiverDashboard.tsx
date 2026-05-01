@@ -37,24 +37,50 @@ function dirLabel(d: string | undefined, conf: number | undefined, detected: boo
   )
 }
 
-function ServicePanel({ data, isRunning }: { data: ServiceResults; isRunning: boolean }) {
+function StatusBadge({ isRunning, exists }: { isRunning: boolean; exists: boolean }) {
+  if (isRunning) return (
+    <span className="flex items-center gap-1.5 text-xs font-medium text-green-400">
+      <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse shrink-0" />
+      Live
+    </span>
+  )
+  if (!exists) return (
+    <span className="flex items-center gap-1.5 text-xs font-medium text-slate-500">
+      <span className="w-1.5 h-1.5 rounded-full bg-slate-600 shrink-0" />
+      Deleted
+    </span>
+  )
+  return (
+    <span className="flex items-center gap-1.5 text-xs font-medium text-amber-500">
+      <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+      Stopped
+    </span>
+  )
+}
+
+function ServicePanel({ data, isRunning, exists }: { data: ServiceResults; isRunning: boolean; exists: boolean }) {
   const lastDir = data.results[0]?.car?.direction
   const hasResults = data.results.length > 0
 
   return (
-    <div className="bg-[#16213e] border border-[#1e293b] rounded-xl overflow-hidden flex flex-col" style={{ minWidth: 480 }}>
+    <div className={`bg-[#16213e] border rounded-xl overflow-hidden flex flex-col
+      ${!exists ? 'border-slate-700/50 opacity-75' : 'border-[#1e293b]'}`}
+      style={{ minWidth: 480 }}>
       {/* Panel header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[#1e293b]">
-        <span className="text-sm font-bold text-violet-300">{data.name}</span>
         <div className="flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${isRunning ? 'bg-green-400 animate-pulse' : 'bg-slate-600'}`} />
-          <span className="text-xs text-slate-500">
-            {isRunning
-              ? `Live · ${new Date(data.lastSeen).toLocaleTimeString()}`
-              : hasResults
-                ? `Last: ${new Date(data.lastSeen).toLocaleTimeString()}`
-                : 'no data'}
-          </span>
+          <span className={`text-sm font-bold ${exists ? 'text-violet-300' : 'text-slate-500'}`}>{data.name}</span>
+          {!exists && (
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-600 bg-slate-800 px-1.5 py-0.5 rounded">removed</span>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          <StatusBadge isRunning={isRunning} exists={exists} />
+          {hasResults && (
+            <span className="text-xs text-slate-600">
+              {isRunning ? new Date(data.lastSeen).toLocaleTimeString() : `Last: ${new Date(data.lastSeen).toLocaleTimeString()}`}
+            </span>
+          )}
         </div>
       </div>
 
@@ -131,6 +157,7 @@ function ServicePanel({ data, isRunning }: { data: ServiceResults; isRunning: bo
 export function ReceiverDashboard() {
   const [panels, setPanels] = useState<Record<string, ServiceResults>>({})
   const [runningSet, setRunningSet] = useState<Set<string>>(new Set())
+  const [existingSet, setExistingSet] = useState<Set<string>>(new Set())
   const esRefs = useRef<Map<string, EventSource>>(new Map())
 
   // Subscribe to all services via SSE + poll buffered results on mount
@@ -187,8 +214,9 @@ export function ReceiverDashboard() {
   // Poll running service status — drives the live indicator
   useEffect(() => {
     const update = () => {
-      getServices().then((svcs: { name: string; running: boolean }[]) => {
-        setRunningSet(new Set(svcs.filter(s => s.running).map(s => s.name)))
+      getServices().then((svcs: { name: string; state: string }[]) => {
+        setRunningSet(new Set(svcs.filter(s => s.state === 'running').map(s => s.name)))
+        setExistingSet(new Set(svcs.map(s => s.name)))
       }).catch(() => {})
     }
     update()
@@ -276,7 +304,7 @@ export function ReceiverDashboard() {
       ) : (
         <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(480px, 1fr))' }}>
           {panelList.map(data => (
-            <ServicePanel key={data.name} data={data} isRunning={runningSet.has(data.name)} />
+            <ServicePanel key={data.name} data={data} isRunning={runningSet.has(data.name)} exists={existingSet.has(data.name)} />
           ))}
         </div>
       )}

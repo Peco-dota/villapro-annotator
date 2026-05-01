@@ -9,7 +9,7 @@ import {
   startPreview, stopPreview,
   startTcpPush, stopTcpPush,
   getMjpegStreamUrl, getVideoState,
-  videoPause, videoSpeed, videoSeek, videoStep,
+  videoPause, videoSpeed, videoSeek, videoSeekTo, videoStep,
   sseUrl, api,
 } from '../../lib/api'
 import type { ServiceConfig, ServiceStatus } from '../../lib/types'
@@ -217,10 +217,17 @@ function InlinePreview({ service, onStop, runKey }: { service: ServiceConfig; on
     refetchInterval: isVideo ? 500 : false,
   })
 
-  const pauseMut = useMutation({ mutationFn: () => videoPause(service.name), onSuccess: () => refetchVideo() })
-  const speedMut = useMutation({ mutationFn: (s: number) => videoSpeed(service.name, s), onSuccess: () => refetchVideo() })
-  const seekMut  = useMutation({ mutationFn: (d: number) => videoSeek(service.name, d),  onSuccess: () => refetchVideo() })
-  const stepMut  = useMutation({ mutationFn: () => videoStep(service.name) })
+  const pauseMut  = useMutation({ mutationFn: () => videoPause(service.name), onSuccess: () => refetchVideo() })
+  const speedMut  = useMutation({ mutationFn: (s: number) => videoSpeed(service.name, s), onSuccess: () => refetchVideo() })
+  const seekMut   = useMutation({ mutationFn: (d: number) => videoSeek(service.name, d),  onSuccess: () => refetchVideo() })
+  const seekToMut = useMutation({ mutationFn: (ms: number) => videoSeekTo(service.name, ms), onSuccess: () => refetchVideo() })
+  const stepMut   = useMutation({ mutationFn: () => videoStep(service.name) })
+
+  const [hoverPct, setHoverPct] = useState<number | null>(null)
+  const getPct = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+  }
 
   const fmtTime = (ms: number) => {
     const s = Math.floor(ms / 1000)
@@ -237,7 +244,7 @@ function InlinePreview({ service, onStop, runKey }: { service: ServiceConfig; on
   const lastDir = receiverData.results[0]?.car?.direction
 
   return (
-    <div className="border-t border-[#1e293b] bg-[#0a0f1e] rounded-b-xl overflow-hidden">
+    <div className="border-t border-[#1e293b] bg-[#0a0f1e] rounded-b-xl">
       <div className="flex" style={{ height: 420 }}>
 
         {/* ── Left: video feed ── */}
@@ -278,19 +285,38 @@ function InlinePreview({ service, onStop, runKey }: { service: ServiceConfig; on
               {dur > 0 && (
                 <div className="flex items-center gap-2 text-xs text-slate-500">
                   <span className="w-10 text-right shrink-0">{fmtTime(pos)}</span>
-                  <div className="flex-1 h-1.5 bg-slate-700 rounded-full cursor-pointer"
-                    onClick={e => {
-                      const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
-                      seekMut.mutate((e.clientX - rect.left) / rect.width * dur - pos)
-                    }}
+                  <div
+                    className="flex-1 py-2 -my-2 relative cursor-pointer"
+                    onClick={e => seekToMut.mutate(getPct(e) * dur)}
+                    onMouseMove={e => setHoverPct(getPct(e))}
+                    onMouseLeave={() => setHoverPct(null)}
                   >
-                    <div className="h-full bg-violet-500 rounded-full" style={{ width: `${dur > 0 ? (pos / dur) * 100 : 0}%` }} />
+                    <div className="w-full h-1.5 bg-slate-700 rounded-full relative">
+                      <div className="h-full bg-violet-500 rounded-full" style={{ width: `${(pos / dur) * 100}%` }} />
+                      {hoverPct !== null && (
+                        <>
+                          <div
+                            className="absolute top-0 bottom-0 w-0.5 bg-white/60 rounded-full pointer-events-none"
+                            style={{ left: `${hoverPct * 100}%`, transform: 'translateX(-50%)' }}
+                          />
+                          <div
+                            className="absolute -top-7 bg-slate-800 border border-slate-600 text-white text-[10px] font-mono px-1.5 py-0.5 rounded pointer-events-none whitespace-nowrap z-50"
+                            style={{
+                              left: `${hoverPct * 100}%`,
+                              transform: `translateX(${hoverPct < 0.1 ? '0%' : hoverPct > 0.9 ? '-100%' : '-50%'})`,
+                            }}
+                          >
+                            {fmtTime(hoverPct * dur)}
+                          </div>
+                        </>
+                      )}
+                    </div>
                   </div>
                   <span className="w-10 shrink-0">{fmtTime(dur)}</span>
                 </div>
               )}
               <div className="flex items-center gap-1.5 flex-wrap">
-                <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-pos)} title="Go to start">⏮</Button>
+                <Button size="sm" variant="ghost" onClick={() => seekToMut.mutate(0)} title="Go to start">⏮</Button>
                 <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-15000)}>-15s</Button>
                 <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-5000)}>-5s</Button>
                 <Button size="sm" variant="ghost" onClick={() => pauseMut.mutate()} disabled={pauseMut.isPending}>

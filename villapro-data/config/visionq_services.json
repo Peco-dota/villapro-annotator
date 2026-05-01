@@ -1,6 +1,6 @@
 [
   {
-    "name": "test01",
+    "name": "test01-copy",
     "model_path": "/villapro-data/models/ultimate_best_yolo26n.pt",
     "input_host": "0.0.0.0",
     "input_port": 5050,

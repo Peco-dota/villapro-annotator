@@ -221,6 +221,28 @@ export const getRecordingDownloadUrl = (path: string): string => {
   return `${base}/api/recordings/download?path=${encodeURIComponent(path)}&token=${encodeURIComponent(token)}`
 }
 
+// ── Debug Logs ────────────────────────────────────────────────────────────────
+
+export interface DebugLog {
+  path: string
+  filename: string
+  service: string
+  size_bytes: number
+  created_at: number  // unix timestamp (seconds)
+}
+
+export const listDebugLogs = (): Promise<DebugLog[]> =>
+  api.get('/api/debug-logs').then(r => r.data)
+
+export const deleteDebugLog = (path: string): Promise<{ deleted: string }> =>
+  api.delete('/api/debug-logs', { params: { path } }).then(r => r.data)
+
+export const getDebugLogDownloadUrl = (path: string): string => {
+  const token = localStorage.getItem('visionq_token') ?? ''
+  const base = (import.meta.env.VITE_API_URL as string) || ''
+  return `${base}/api/debug-logs/download?path=${encodeURIComponent(path)}&token=${encodeURIComponent(token)}`
+}
+
 export const fsMkdir = (parent: string, name: string): Promise<{ path: string }> =>
   api.post('/api/fs/mkdir', { parent, name }).then(r => r.data)
 

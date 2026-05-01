@@ -1330,10 +1330,10 @@ class DetectionService:
         with self._video_state_lock:
             self._video_speed = max(0.1, float(speed))
 
-    def seek_video_relative(self, delta_seconds: float):
-        """Seek by delta_seconds relative to current position. Thread-safe."""
+    def seek_video_relative(self, delta_ms: float):
+        """Seek by delta_ms milliseconds relative to current position. Thread-safe."""
         with self._video_state_lock:
-            target = self._video_pos_ms + delta_seconds * 1000.0
+            target = self._video_pos_ms + delta_ms
             target = max(0.0, target)
             if self._video_duration_ms > 0:
                 target = min(target, self._video_duration_ms - 500.0)
