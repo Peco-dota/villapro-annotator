@@ -29,7 +29,10 @@ def _collect_dirs() -> set[str]:
 
 def _is_safe_mp4(path: str) -> bool:
     abs_path = os.path.realpath(os.path.abspath(path))
-    return abs_path.lower().endswith(".mp4") and os.path.isfile(abs_path)
+    if not (abs_path.lower().endswith(".mp4") and os.path.isfile(abs_path)):
+        return False
+    allowed = {os.path.realpath(d) for d in _collect_dirs() if os.path.isdir(d)}
+    return any(abs_path.startswith(d + os.sep) for d in allowed)
 
 
 @router.get("")

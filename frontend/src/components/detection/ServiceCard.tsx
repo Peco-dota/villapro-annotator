@@ -29,10 +29,10 @@ const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', 
 
 function useSpinner() {
   const [frame, setFrame] = useState(0)
-  useState(() => {
+  useEffect(() => {
     const id = setInterval(() => setFrame(f => (f + 1) % SPINNER_FRAMES.length), 80)
     return () => clearInterval(id)
-  })
+  }, [])
   return SPINNER_FRAMES[frame]
 }
 
@@ -240,6 +240,14 @@ function InlinePreview({ service, onStop, runKey }: { service: ServiceConfig; on
   const currentSpeed = videoState?.speed ?? 1
 
   const receiverData = useServiceResults(service.name, true, runKey)
+  const [, forceUpdate] = useState(0)
+  useEffect(() => {
+    if (!receiverData.lastSeen) return
+    const remaining = 5000 - (Date.now() - receiverData.lastSeen)
+    if (remaining <= 0) return
+    const id = setTimeout(() => forceUpdate(n => n + 1), remaining + 50)
+    return () => clearTimeout(id)
+  }, [receiverData.lastSeen])
   const isLive = Date.now() - receiverData.lastSeen < 5000
   const lastDir = receiverData.results[0]?.car?.direction
 

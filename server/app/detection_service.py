@@ -31,13 +31,8 @@ from PIL import Image
 log = logging.getLogger("detection_service")
 
 # ── Direction debug capture ────────────────────────────────────────────────────
-# Call start_direction_debug(path) to begin writing a CSV of every frame's
-# bbox signals + direction computation.  Call stop_direction_debug() to flush
-# and close.  Thread-safe.
-
-_dbg_lock   = threading.Lock()
-_dbg_file   = None
-_dbg_writer = None
+# State is now per-service (instance attributes on DetectionService) so two
+# services can each capture a debug CSV simultaneously without interfering.
 
 _DBG_COLUMNS = [
     "timestamp", "service", "cls",
@@ -48,39 +43,6 @@ _DBG_COLUMNS = [
     "raw_dir", "final_dir",
     "gate_threshold", "gate_open",
 ]
-
-
-def start_direction_debug(path: str) -> None:
-    """Start writing per-frame direction debug data to *path* (CSV)."""
-    global _dbg_file, _dbg_writer
-    with _dbg_lock:
-        if _dbg_file is not None:
-            _dbg_file.close()
-        _dbg_file = open(path, "w", newline="", encoding="utf-8")
-        _dbg_writer = csv.DictWriter(_dbg_file, fieldnames=_DBG_COLUMNS)
-        _dbg_writer.writeheader()
-        _dbg_file.flush()
-    log.info(f"Direction debug logging started → {path}")
-
-
-def stop_direction_debug() -> None:
-    """Flush and close the direction debug CSV."""
-    global _dbg_file, _dbg_writer
-    with _dbg_lock:
-        if _dbg_file is not None:
-            _dbg_file.flush()
-            _dbg_file.close()
-            _dbg_file = None
-            _dbg_writer = None
-    log.info("Direction debug logging stopped.")
-
-
-def _dbg_write(row: dict) -> None:
-    """Write one row to the debug CSV; no-op when debug is not active."""
-    with _dbg_lock:
-        if _dbg_writer is not None:
-            _dbg_writer.writerow(row)
-            _dbg_file.flush()
 
 def _notify_internal(service_name: str, payload: dict) -> None:
     """Fan result out to internal SSE subscribers and the in-memory buffer.
@@ -189,6 +151,13 @@ class ServiceConfig:
     # Gate open trigger: emit gate_open=True when car is idle with bbox area >= this value.
     # Set to 0 to disable.  Typical value: measure the area when the car fills the frame.
     gate_area_threshold: float = 0.0
+    # TCP push: persisted so the server auto-restarts the push socket on startup
+    tcp_push_enabled: bool = False
+    tcp_push_host: str = "0.0.0.0"
+    tcp_push_port: int = 0
+    tcp_push_certfile: str = ""
+    tcp_push_keyfile: str = ""
+    tcp_push_ca_certs: str = ""
 
     @property
     def rtsp_url(self) -> str:
@@ -234,6 +203,12 @@ class ServiceConfig:
             record_stream=d.get("record_stream", False),
             record_dir=d.get("record_dir", ""),
             gate_area_threshold=float(d.get("gate_area_threshold", 0.0)),
+            tcp_push_enabled=d.get("tcp_push_enabled", False),
+            tcp_push_host=d.get("tcp_push_host", "0.0.0.0"),
+            tcp_push_port=int(d.get("tcp_push_port", 0)),
+            tcp_push_certfile=d.get("tcp_push_certfile", ""),
+            tcp_push_keyfile=d.get("tcp_push_keyfile", ""),
+            tcp_push_ca_certs=d.get("tcp_push_ca_certs", ""),
         )
 
 
@@ -668,6 +643,11 @@ class DetectionService:
         self._video_duration_ms: float = 0.0
         self._video_paused: bool = False
         self._video_step: bool = False  # step one frame while paused
+        # Per-instance direction debug CSV state (each service has its own file)
+        self._dbg_lock   = threading.Lock()
+        self._dbg_file   = None
+        self._dbg_writer = None
+        self._dbg_path   = ""
 
     @staticmethod
     def _make_class_state() -> dict:
@@ -1135,7 +1115,8 @@ class DetectionService:
     def _resolve_record_dir(self, configured_dir: str) -> str:
         if configured_dir.strip():
             return configured_dir.strip()
-        return "/villapro-data/recordings"
+        import os as _os
+        return _os.path.join(_os.environ.get("VISIONQ_DATA", "/data"), "recordings")
 
     def _open_video_writer_if_needed(
         self,
@@ -1245,18 +1226,38 @@ class DetectionService:
 
     @property
     def is_direction_debugging(self) -> bool:
-        with _dbg_lock:
-            return _dbg_file is not None
+        with self._dbg_lock:
+            return self._dbg_file is not None
 
     def start_direction_debug(self, path: str) -> None:
         """Start writing per-frame direction signals to a CSV at *path*."""
         self._dbg_path = path
-        start_direction_debug(path)
+        with self._dbg_lock:
+            if self._dbg_file is not None:
+                self._dbg_file.close()
+            self._dbg_file = open(path, "w", newline="", encoding="utf-8")
+            self._dbg_writer = csv.DictWriter(self._dbg_file, fieldnames=_DBG_COLUMNS)
+            self._dbg_writer.writeheader()
+            self._dbg_file.flush()
+        log.info(f"Direction debug logging started → {path}")
 
     def stop_direction_debug(self) -> str:
         """Flush and close the direction debug CSV. Returns the file path."""
-        stop_direction_debug()
-        return getattr(self, "_dbg_path", "")
+        with self._dbg_lock:
+            if self._dbg_file is not None:
+                self._dbg_file.flush()
+                self._dbg_file.close()
+                self._dbg_file = None
+                self._dbg_writer = None
+        log.info("Direction debug logging stopped.")
+        return self._dbg_path
+
+    def _dbg_write(self, row: dict) -> None:
+        """Write one row to this service's debug CSV; no-op when not active."""
+        with self._dbg_lock:
+            if self._dbg_writer is not None:
+                self._dbg_writer.writerow(row)
+                self._dbg_file.flush()
 
     @property
     def is_previewing(self) -> bool:
@@ -1405,7 +1406,7 @@ class DetectionService:
             if not detected:
                 current_state = "no_car"
                 state["idle_streak"] = 0
-                _dbg_write({
+                self._dbg_write({
                     "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
                     "service": service_name, "cls": cls_name,
                     "detected": False, "cx": "", "cy": "", "area": "", "conf": "",
@@ -1446,7 +1447,7 @@ class DetectionService:
                     and resolved == "idle"
                     and last_entry[2] >= gate_area_threshold
                 )
-                _dbg_write({
+                self._dbg_write({
                     "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
                     "service": service_name, "cls": cls_name,
                     "detected": True,
@@ -1463,7 +1464,7 @@ class DetectionService:
             else:
                 current_state = None  # still building
                 last_entry = buf_list[-1] if buf_list else (0, 0, 0)
-                _dbg_write({
+                self._dbg_write({
                     "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
                     "service": service_name, "cls": cls_name,
                     "detected": True,

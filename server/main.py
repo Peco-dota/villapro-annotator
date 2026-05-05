@@ -33,6 +33,7 @@ from fastapi.responses import FileResponse
 
 from app.config import init_config
 from app.version import VERSION
+import asyncio
 from app.routers import system, projects, annotations, detection, datasets, fs, auth, recordings, debug_logs
 from app.db import init_db
 
@@ -52,6 +53,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         log.info(f"VisionQ Server v{VERSION} starting up")
         log.info(f"Config file: {cfg.path}")
+        detection.set_event_loop(asyncio.get_running_loop())
         from app.detection_service import get_registry
 
         def _on_auto_done(name: str, error: str):
@@ -61,6 +63,23 @@ def create_app(config_path: str | None = None) -> FastAPI:
                 log.info(f"[auto-start] {name}: running")
 
         get_registry().auto_start_services(_on_auto_done)
+
+        from app.tcp_push import get_tcp_registry
+        for _cfg in get_registry().get_configs():
+            if _cfg.tcp_push_enabled and _cfg.tcp_push_port > 0:
+                _err = get_tcp_registry().start(
+                    service_name=_cfg.name,
+                    host=_cfg.tcp_push_host,
+                    port=_cfg.tcp_push_port,
+                    certfile=_cfg.tcp_push_certfile or None,
+                    keyfile=_cfg.tcp_push_keyfile or None,
+                    ca_certs=_cfg.tcp_push_ca_certs or None,
+                )
+                if _err:
+                    log.error(f"[auto-start tcp_push] {_cfg.name}: {_err}")
+                else:
+                    log.info(f"[auto-start tcp_push] {_cfg.name}: port {_cfg.tcp_push_port}")
+
         yield
         log.info("VisionQ Server shutting down…")
         from app.tcp_push import get_tcp_registry

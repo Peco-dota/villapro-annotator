@@ -1,19 +1,18 @@
 services:
   visionq:
-    build: .
-    image: visionq:latest
+    image: ${VISIONQ_IMAGE:-visionq:latest}
     container_name: visionq
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "${VISIONQ_PORT:-8000}:8000"
       # TCP push ports — add one per service you configure, e.g.:
       # - "9001:9001"
       # - "9002:9002"
     volumes:
       # All persistent user data — projects, models, recordings, config, database
-      - ./villapro-data:/villapro-data
+      - ${VISIONQ_DATA_DIR:-./villapro-data}:/villapro-data
     environment:
-      - VISIONQ_SECRET=123   # change this before deploying!
+      - VISIONQ_SECRET=${VISIONQ_SECRET}
       - VISIONQ_DATA=/villapro-data
     deploy:
       resources:

@@ -29,9 +29,16 @@ from app.db import get_user, verify_password
 
 _bearer = HTTPBearer(auto_error=False)
 
-# Secret key — override via VISIONQ_SECRET env var in production
-_SECRET = os.environ.get("VISIONQ_SECRET", "visionq-dev-secret-change-in-production")
+_DEFAULT_SECRET = "visionq-dev-secret-change-in-production"
+_SECRET = os.environ.get("VISIONQ_SECRET", _DEFAULT_SECRET)
 _ALGORITHM = "HS256"
+
+if _SECRET == _DEFAULT_SECRET:
+    import logging as _logging
+    _logging.getLogger("visionq").warning(
+        "VISIONQ_SECRET is not set — using the default dev secret. "
+        "Set VISIONQ_SECRET in your environment before deploying."
+    )
 _TOKEN_EXPIRE_HOURS = 24 * 7  # 1 week
 
 

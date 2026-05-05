@@ -42,11 +42,10 @@ def _do_notify_mjpeg(service_name: str, frame) -> None:
             pass  # slow viewer — drop this frame rather than build lag
 
 
-@router.on_event("startup")
-async def _capture_loop():
-    """Capture the running event loop at startup so background threads can schedule onto it."""
+def set_event_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Called from the app lifespan to give background threads a reference to the event loop."""
     global _event_loop
-    _event_loop = asyncio.get_running_loop()
+    _event_loop = loop
 
 
 def _notify_sse(service_name: str, payload: dict):
@@ -107,8 +106,8 @@ class ServiceConfigIn(BaseModel):
 def _cfg_to_dict(cfg: ServiceConfig, registry) -> dict:
     d = cfg.to_dict()
     d["state"] = registry.get_state(cfg.name)
-    d["log"] = [str(e) for e in (registry.get_service(cfg.name).get_log_entries()
-                                  if registry.get_service(cfg.name) else [])]
+    svc = registry.get_service(cfg.name)
+    d["log"] = [str(e) for e in (svc.get_log_entries() if svc else [])]
     tcp_reg = get_tcp_registry()
     d["tcp_push_running"] = tcp_reg.is_running(cfg.name)
     return d
@@ -158,6 +157,12 @@ def create_or_update_service(req: ServiceConfigIn, _user: dict = Depends(require
         record_stream=req.record_stream,
         record_dir=req.record_dir,
         gate_area_threshold=req.gate_area_threshold,
+        tcp_push_enabled=req.tcp_push_enabled,
+        tcp_push_host=req.tcp_push_host,
+        tcp_push_port=req.tcp_push_port,
+        tcp_push_certfile=req.tcp_push_certfile,
+        tcp_push_keyfile=req.tcp_push_keyfile,
+        tcp_push_ca_certs=req.tcp_push_ca_certs,
     )
     get_registry().upsert_config(cfg)
     return _cfg_to_dict(cfg, get_registry())
@@ -484,7 +489,8 @@ class TcpPushStartRequest(BaseModel):
 def start_tcp_push(name: str, req: TcpPushStartRequest,
                    _user: dict = Depends(require_user)):
     reg = get_registry()
-    if reg.get_config(name) is None:
+    cfg = reg.get_config(name)
+    if cfg is None:
         raise HTTPException(status_code=404, detail=f"Service '{name}' not found.")
     err = get_tcp_registry().start(
         service_name=name,
@@ -496,12 +502,26 @@ def start_tcp_push(name: str, req: TcpPushStartRequest,
     )
     if err:
         raise HTTPException(status_code=400, detail=err)
+    from dataclasses import replace
+    reg.upsert_config(replace(cfg,
+        tcp_push_enabled=True,
+        tcp_push_host=req.host,
+        tcp_push_port=req.port,
+        tcp_push_certfile=req.certfile,
+        tcp_push_keyfile=req.keyfile,
+        tcp_push_ca_certs=req.ca_certs,
+    ))
     return {"tcp_push": True, "port": req.port}
 
 
 @router.post("/services/{name}/tcp/stop")
 def stop_tcp_push(name: str, _user: dict = Depends(require_user)):
+    reg = get_registry()
+    cfg = reg.get_config(name)
     get_tcp_registry().stop(name)
+    if cfg is not None:
+        from dataclasses import replace
+        reg.upsert_config(replace(cfg, tcp_push_enabled=False))
     return {"tcp_push": False}
 
 

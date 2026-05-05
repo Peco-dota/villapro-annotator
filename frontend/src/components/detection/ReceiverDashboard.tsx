@@ -262,8 +262,10 @@ export function ReceiverDashboard() {
     }
   }, [])
 
-  // Subscribe to any panel that appears
-  for (const name of Object.keys(panels)) subscribeToService(name)
+  // Subscribe to any panel that appears — inside an effect to avoid side effects during render
+  useEffect(() => {
+    for (const name of Object.keys(panels)) subscribeToService(name)
+  })
 
   const panelList = Object.values(panels)
 
