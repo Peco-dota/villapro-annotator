@@ -20,31 +20,33 @@ def get_info(_user: dict = Depends(require_user)):
     }
 
 
-# ── API token management (commented out — kept for future re-enablement) ──────
-#
-# class TokenCreateRequest(BaseModel):
-#     name: str
-#
-# class TokenRevokeRequest(BaseModel):
-#     token: str
-#
-# @router.get("/tokens")
-# def list_tokens(_user: dict = Depends(require_admin)):
-#     cfg = get_config()
-#     return [{"name": t["name"]} for t in cfg.get_tokens()]
-#
-# @router.post("/tokens", status_code=201)
-# def create_token(req: TokenCreateRequest, _user: dict = Depends(require_admin)):
-#     cfg = get_config()
-#     token = cfg.create_token(req.name)
-#     return {"name": req.name, "token": token}
-#
-# @router.delete("/tokens")
-# def revoke_token(req: TokenRevokeRequest, _user: dict = Depends(require_admin)):
-#     cfg = get_config()
-#     if not cfg.revoke_token(req.token):
-#         raise HTTPException(status_code=404, detail="Token not found.")
-#     return {"revoked": True}
+# ── API token management ───────────────────────────────────────────────────────
+
+class TokenCreateRequest(BaseModel):
+    label: str
+
+
+@router.get("/tokens")
+def list_tokens(_user: dict = Depends(require_admin)):
+    cfg = get_config()
+    return [{"label": t["label"], "token": t["token"], "created_at": t.get("created_at", "")}
+            for t in cfg.get_tokens()]
+
+
+@router.post("/tokens", status_code=201)
+def create_token(req: TokenCreateRequest, _user: dict = Depends(require_admin)):
+    cfg = get_config()
+    token = cfg.create_token(req.label)
+    from datetime import datetime, timezone
+    return {"label": req.label, "token": token, "created_at": datetime.now(timezone.utc).isoformat()}
+
+
+@router.delete("/tokens/{token}")
+def revoke_token(token: str, _user: dict = Depends(require_admin)):
+    cfg = get_config()
+    if not cfg.revoke_token(token):
+        raise HTTPException(status_code=404, detail="Token not found.")
+    return {"revoked": True}
 
 
 # ── Server settings ───────────────────────────────────────────────────────────

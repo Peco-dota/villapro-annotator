@@ -1,5 +1,9 @@
 services:
   visionq:
+    build:
+      context: .
+      args:
+        BASE: ${VISIONQ_BASE_IMAGE:-ubuntu:22.04}
     image: ${VISIONQ_IMAGE:-visionq:latest}
     container_name: visionq
     restart: unless-stopped
@@ -14,11 +18,4 @@ services:
     environment:
       - VISIONQ_SECRET=${VISIONQ_SECRET}
       - VISIONQ_DATA=/villapro-data
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
 

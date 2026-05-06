@@ -47,13 +47,12 @@ else
     info "Docker Compose installed."
 fi
 
-# ── 4. NVIDIA driver + container toolkit (optional but needed for GPU) ────────
-step "Checking NVIDIA GPU support..."
-if ! command -v nvidia-smi &>/dev/null; then
-    warn "nvidia-smi not found — skipping GPU setup."
-    warn "VisionQ will run in CPU-only mode. Install NVIDIA drivers first if you need GPU inference."
-else
-    info "NVIDIA driver detected: $(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
+# ── 4. GPU detection ──────────────────────────────────────────────────────────
+step "Detecting GPU..."
+GPU_ENABLED=false
+
+if command -v nvidia-smi &>/dev/null; then
+    info "NVIDIA GPU detected: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
 
     if ! dpkg -s nvidia-container-toolkit &>/dev/null 2>&1; then
         step "NVIDIA Container Toolkit not found — installing..."
@@ -68,8 +67,13 @@ else
         sudo systemctl restart docker
         info "NVIDIA Container Toolkit installed."
     else
-        info "NVIDIA Container Toolkit is already installed."
+        info "NVIDIA Container Toolkit already installed."
     fi
+
+    GPU_ENABLED=true
+else
+    warn "No NVIDIA GPU found — VisionQ will run in CPU mode."
+    warn "Inference will be slower (2–8 FPS typical). Suitable for low-speed camera streams."
 fi
 
 # ── 5. .env file ──────────────────────────────────────────────────────────────
@@ -81,7 +85,6 @@ else
         error ".env.example not found. Make sure you are running this script from the VisionQ directory."
     fi
 
-    # Generate a strong secret
     if command -v openssl &>/dev/null; then
         SECRET=$(openssl rand -hex 32)
     else
@@ -93,6 +96,17 @@ else
     info ".env created with a generated secret."
 fi
 
+# ── 6. Write GPU/CPU mode into .env ───────────────────────────────────────────
+# Remove any previous COMPOSE_FILE line and rewrite it based on detected hardware
+sed -i '/^COMPOSE_FILE=/d' .env
+if [[ "$GPU_ENABLED" == "true" ]]; then
+    echo "COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml" >> .env
+    info "GPU mode enabled — using docker-compose.gpu.yml overlay."
+else
+    echo "COMPOSE_FILE=docker-compose.yml" >> .env
+    info "CPU mode enabled."
+fi
+
 # Validate that VISIONQ_SECRET is actually set
 # shellcheck disable=SC1091
 source .env 2>/dev/null || true
@@ -100,7 +114,7 @@ if [[ -z "${VISIONQ_SECRET:-}" ]]; then
     error "VISIONQ_SECRET is empty in .env. Please set it to a strong random value (openssl rand -hex 32)."
 fi
 
-# ── 6. Create data directory ───────────────────────────────────────────────────
+# ── 7. Create data directory ───────────────────────────────────────────────────
 DATA_DIR="${VISIONQ_DATA_DIR:-./villapro-data}"
 if [[ ! -d "$DATA_DIR" ]]; then
     mkdir -p "$DATA_DIR"
@@ -109,24 +123,31 @@ else
     info "Data directory already exists: $DATA_DIR"
 fi
 
-# ── 7. Pull image and start ───────────────────────────────────────────────────
-step "Pulling VisionQ image..."
-docker compose pull
+# ── 8. Build and start ────────────────────────────────────────────────────────
+step "Building VisionQ image..."
+docker compose build
 
 step "Starting VisionQ..."
 docker compose up -d
 
 PORT="${VISIONQ_PORT:-8000}"
+IP=$(hostname -I | awk '{print $1}')
 
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║   VisionQ is up and running!             ║${NC}"
 echo -e "${GREEN}║                                          ║${NC}"
-echo -e "${GREEN}║   Open: http://$(hostname -I | awk '{print $1}'):${PORT}          ║${NC}"
-echo -e "${GREEN}║   Docs: http://$(hostname -I | awk '{print $1}'):${PORT}/docs     ║${NC}"
+if [[ "$GPU_ENABLED" == "true" ]]; then
+echo -e "${GREEN}║   Mode: GPU accelerated                  ║${NC}"
+else
+echo -e "${GREEN}║   Mode: CPU only                         ║${NC}"
+fi
+echo -e "${GREEN}║                                          ║${NC}"
+echo -e "${GREEN}║   Open: http://${IP}:${PORT}          ║${NC}"
+echo -e "${GREEN}║   Docs: http://${IP}:${PORT}/docs     ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════╝${NC}"
 echo ""
 echo "To stop:    docker compose down"
-echo "To update:  docker compose pull && docker compose up -d"
+echo "To update:  docker compose build && docker compose up -d"
 echo "To logs:    docker compose logs -f"
 echo ""

@@ -80,13 +80,18 @@ class AppConfig:
     def get_tokens(self) -> list[dict]:
         return list(self._data.get("api_tokens", []))
 
-    def validate_token(self, token: str) -> bool:
-        return any(t["token"] == token for t in self._data.get("api_tokens", []))
+    def validate_token(self, token: str) -> Optional[dict]:
+        """Return the token record if valid, else None."""
+        for t in self._data.get("api_tokens", []):
+            if t["token"] == token:
+                return t
+        return None
 
-    def create_token(self, name: str) -> str:
+    def create_token(self, label: str) -> str:
+        from datetime import datetime, timezone
         token = secrets.token_hex(32)
         tokens = self._data.setdefault("api_tokens", [])
-        tokens.append({"name": name, "token": token})
+        tokens.append({"label": label, "token": token, "created_at": datetime.now(timezone.utc).isoformat()})
         self.save()
         return token
 

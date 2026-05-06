@@ -75,15 +75,25 @@ def require_user(
         raw = credentials.credentials
     if not raw:
         raise exc
+
+    # Try JWT first
     try:
         payload = jwt.decode(raw, _SECRET, algorithms=[_ALGORITHM])
         username: str = payload.get("sub", "")
         role: str = payload.get("role", "customer")
         if not username:
             raise exc
+        return {"username": username, "role": role}
     except JWTError:
-        raise exc
-    return {"username": username, "role": role}
+        pass
+
+    # Fall back to API token
+    from app.config import get_config
+    record = get_config().validate_token(raw)
+    if record:
+        return {"username": record["label"], "role": "admin"}
+
+    raise exc
 
 
 def require_admin(current_user: dict = Depends(require_user)) -> dict:
