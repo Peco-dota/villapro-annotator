@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import threading
 from typing import Optional, AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -25,6 +26,26 @@ _event_loop: asyncio.AbstractEventLoop | None = None
 
 # MJPEG subscribers: service_name -> list of per-viewer asyncio queues (numpy BGR frames)
 _mjpeg_queues: dict[str, list[asyncio.Queue]] = {}
+
+# Counting hooks: detection service name → list of callbacks registered by counting services.
+# Called from _do_notify (asyncio event loop thread). register/unregister may be called
+# from FastAPI sync route handlers (threadpool), so access is protected by a lock.
+_counting_hooks: dict[str, list] = {}
+_counting_hooks_lock = threading.Lock()
+
+
+def register_counting_hook(source_service: str, callback) -> None:
+    with _counting_hooks_lock:
+        _counting_hooks.setdefault(source_service, []).append(callback)
+
+
+def unregister_counting_hook(source_service: str, callback) -> None:
+    with _counting_hooks_lock:
+        hooks = _counting_hooks.get(source_service, [])
+        try:
+            hooks.remove(callback)
+        except ValueError:
+            pass
 
 
 def _notify_mjpeg(service_name: str, frame) -> None:
@@ -62,8 +83,16 @@ def _do_notify(service_name: str, payload: dict):
             q.put_nowait(payload)
         except asyncio.QueueFull:
             pass
-    # Also push to TCP clients
+    # Push to TCP clients
     get_tcp_registry().push(service_name, payload)
+    # Forward to any counting services subscribed to this detection service
+    with _counting_hooks_lock:
+        hooks = list(_counting_hooks.get(service_name, []))
+    for cb in hooks:
+        try:
+            cb(payload)
+        except Exception:
+            pass
 
 
 # ── Config CRUD ───────────────────────────────────────────────────────────────
@@ -101,6 +130,7 @@ class ServiceConfigIn(BaseModel):
     tcp_push_certfile: str = ""
     tcp_push_keyfile: str = ""
     tcp_push_ca_certs: str = ""
+    kind: str = "detection"
 
 
 def _cfg_to_dict(cfg: ServiceConfig, registry) -> dict:
@@ -163,6 +193,7 @@ def create_or_update_service(req: ServiceConfigIn, _user: dict = Depends(require
         tcp_push_certfile=req.tcp_push_certfile,
         tcp_push_keyfile=req.tcp_push_keyfile,
         tcp_push_ca_certs=req.tcp_push_ca_certs,
+        kind=req.kind,
     )
     get_registry().upsert_config(cfg)
     return _cfg_to_dict(cfg, get_registry())

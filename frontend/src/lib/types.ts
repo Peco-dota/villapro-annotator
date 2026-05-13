@@ -72,6 +72,7 @@ export interface ServiceConfig {
   tcp_push_certfile: string
   tcp_push_keyfile: string
   tcp_push_ca_certs: string
+  kind: 'detection' | 'counter'
 }
 
 export interface ServiceStatus {
@@ -103,6 +104,48 @@ export interface DetectionResult {
   direction: string
   gate_open: boolean
   fps: number
+}
+
+export interface CountingConfig {
+  name: string
+  source_service: string
+  auto_start: boolean
+  initial_count: number
+  output_host: string
+  output_port: number
+  tcp_push_enabled: boolean
+  tcp_push_host: string
+  tcp_push_port: number
+  tcp_push_certfile: string
+  tcp_push_keyfile: string
+  tcp_push_ca_certs: string
+  // runtime fields returned by the API
+  state?: string
+  count?: number
+  last_reset?: string
+  tcp_push_running?: boolean
+}
+
+export interface CountingStatus {
+  name: string
+  source_service: string
+  state: string
+  running: boolean
+  tcp_push_running: boolean
+  count: number
+  last_reset: string
+}
+
+export interface CountingResult {
+  service_name: string
+  source_service: string
+  timestamp: string
+  event: 'car_passed' | 'status' | 'reset'
+  trigger_class: string
+  direction: string
+  change: number
+  count: number
+  last_reset: string
 }
 
 export interface JobStatus {

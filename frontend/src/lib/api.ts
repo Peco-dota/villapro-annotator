@@ -160,6 +160,17 @@ export const startTcpPush = (name: string, data: object) =>
 export const stopTcpPush = (name: string) =>
   api.post(`/api/detection/services/${name}/tcp/stop`).then(r => r.data)
 
+// ── Counting ──────────────────────────────────────────────────────────────────
+export const getCounters = () => api.get('/api/counting/services').then(r => r.data)
+export const getCounter = (name: string) => api.get(`/api/counting/services/${name}`).then(r => r.data)
+export const createCounter = (data: object) => api.post('/api/counting/services', data).then(r => r.data)
+export const deleteCounter = (name: string) => api.delete(`/api/counting/services/${name}`).then(r => r.data)
+export const startCounter = (name: string) => api.post(`/api/counting/services/${name}/start`).then(r => r.data)
+export const stopCounter = (name: string) => api.post(`/api/counting/services/${name}/stop`).then(r => r.data)
+export const getCounterStatus = (name: string) => api.get(`/api/counting/services/${name}/status`).then(r => r.data)
+export const resetCounter = (name: string) => api.post(`/api/counting/services/${name}/reset`).then(r => r.data)
+export const counterSseUrl = (name: string): string => sseUrl(`/api/counting/services/${name}/stream`)
+
 // ── Filesystem ───────────────────────────────────────────────────────────────
 export type FsFilter = 'any' | 'project' | 'images_dir' | 'model' | 'video' | 'yaml' | 'dir'
 
@@ -263,6 +274,8 @@ export const getActiveTrain = () => api.get('/api/datasets/train/active').then(r
 export const trainLogUrl = (jobId: string): string => sseUrl(`/api/datasets/train/log/${jobId}`)
 export const getJob = (job_id: string) => api.get(`/api/datasets/jobs/${job_id}`).then(r => r.data)
 export const cancelJob = (job_id: string) => api.post(`/api/datasets/jobs/${job_id}/cancel`).then(r => r.data)
+export const autoAnnotate = (data: { project_path: string; model_path: string; confidence: number; skip_annotated: boolean }) =>
+  api.post('/api/datasets/auto-annotate', data).then(r => r.data)
 export const getActiveAugJob = () => api.get('/api/datasets/augment/active').then(r => r.data)
 export const getActiveMergeJob = () => api.get('/api/datasets/merge/active').then(r => r.data)
 

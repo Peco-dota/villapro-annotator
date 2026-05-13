@@ -11,6 +11,7 @@ import { AnnotationCanvas } from '../components/annotate/AnnotationCanvas'
 import { ClassSidebar } from '../components/annotate/ClassSidebar'
 import { Toolbar } from '../components/annotate/Toolbar'
 import { ExportDialog } from '../components/annotate/ExportDialog'
+import { AutoAnnotateDialog } from '../components/annotate/AutoAnnotateDialog'
 import { Spinner } from '../components/ui/Spinner'
 
 const UNDO_LIMIT = 50
@@ -29,6 +30,7 @@ export function AnnotatePage() {
   const [undoStack, setUndoStack] = useState<BoundingBox[][]>([])
   const [redoStack, setRedoStack] = useState<BoundingBox[][]>([])
   const [exportOpen, setExportOpen] = useState(false)
+  const [autoAnnotateOpen, setAutoAnnotateOpen] = useState(false)
   const [dirty, setDirty] = useState(false)
   const [zoom, setZoom] = useState(1)
   const [fitScale, setFitScale] = useState(1)
@@ -208,6 +210,7 @@ export function AnnotatePage() {
         onPrev={() => gotoImage('prev')}
         onNext={() => gotoImage('next')}
         onExport={() => setExportOpen(true)}
+        onAutoAnnotate={() => setAutoAnnotateOpen(true)}
         onGoHome={() => nav('/')}
         saving={saveMut.isPending}
         imageName={currentFile}
@@ -296,6 +299,15 @@ export function AnnotatePage() {
       </div>
 
       <ExportDialog open={exportOpen} onClose={() => setExportOpen(false)} projectPath={projectPath} />
+      <AutoAnnotateDialog
+        open={autoAnnotateOpen}
+        onClose={() => {
+          setAutoAnnotateOpen(false)
+          // Reload current image annotations after auto-annotate
+          if (currentFile) qc.invalidateQueries({ queryKey: ['annotations', projectPath, currentFile] })
+        }}
+        projectPath={projectPath}
+      />
     </div>
   )
 }

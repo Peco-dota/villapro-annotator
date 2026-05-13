@@ -10,6 +10,7 @@ interface Props {
   onPrev: () => void
   onNext: () => void
   onExport: () => void
+  onAutoAnnotate: () => void
   saving: boolean
   imageName: string | null
   imageIndex: number
@@ -105,6 +106,7 @@ export function Toolbar(props: Props) {
       >{props.saving ? '…' : '💾'}</button>
 
       {/* Action buttons */}
+      <button className={actionBtn('bg-teal-700 hover:bg-teal-600')} onClick={props.onAutoAnnotate} title="Run YOLO model to pre-fill bounding boxes across all images">✦ Auto-annotate</button>
       <button className={actionBtn('bg-violet-700 hover:bg-violet-600')} onClick={props.onExport} title="Export Dataset">⬆ Export</button>
     </div>
   )

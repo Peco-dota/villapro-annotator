@@ -1,0 +1,30 @@
+[
+  {
+    "name": "test01-count_counter",
+    "source_service": "test01-count",
+    "auto_start": false,
+    "tcp_push_enabled": false,
+    "tcp_push_host": "0.0.0.0",
+    "tcp_push_port": 0,
+    "tcp_push_certfile": "",
+    "tcp_push_keyfile": "",
+    "tcp_push_ca_certs": "",
+    "initial_count": 0,
+    "output_host": "",
+    "output_port": 0
+  },
+  {
+    "name": "test02-stream_counter",
+    "source_service": "test02-stream",
+    "auto_start": false,
+    "tcp_push_enabled": false,
+    "tcp_push_host": "0.0.0.0",
+    "tcp_push_port": 0,
+    "tcp_push_certfile": "",
+    "tcp_push_keyfile": "",
+    "tcp_push_ca_certs": "",
+    "initial_count": 0,
+    "output_host": "",
+    "output_port": 0
+  }
+]

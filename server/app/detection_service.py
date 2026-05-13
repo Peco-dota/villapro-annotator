@@ -158,6 +158,8 @@ class ServiceConfig:
     tcp_push_certfile: str = ""
     tcp_push_keyfile: str = ""
     tcp_push_ca_certs: str = ""
+    # UI kind: "detection" (default) or "counter" (counting-focused service with own stream)
+    kind: str = "detection"
 
     @property
     def rtsp_url(self) -> str:
@@ -209,6 +211,7 @@ class ServiceConfig:
             tcp_push_certfile=d.get("tcp_push_certfile", ""),
             tcp_push_keyfile=d.get("tcp_push_keyfile", ""),
             tcp_push_ca_certs=d.get("tcp_push_ca_certs", ""),
+            kind=d.get("kind", "detection"),
         )
 
 
@@ -1039,10 +1042,16 @@ class DetectionService:
                     latest["ok"] = True
 
                 # When paused we just delivered a single step frame — go back to idle.
-                # When playing, pace the reader to match the processing interval / speed.
+                # When playing, sleep at the processing rate then skip the intermediate
+                # frames so the video position advances in real time.
+                # e.g. 25fps video @ rtsp_interval=0.25s: sleep 0.25s, grab 5 frames,
+                # decode 1 → 4 processed/s, but position moves 25 frames/s = real speed.
                 if not paused:
-                    interval = cfg.rtsp_interval / max(0.1, speed)
-                    self._stop_event.wait(timeout=interval)
+                    self._stop_event.wait(timeout=cfg.rtsp_interval / max(0.1, speed))
+                    _skip = max(0, round(_fps * cfg.rtsp_interval) - 1)
+                    for _ in range(_skip):
+                        if not _cap.grab():
+                            break
 
             _cap.release()
             with self._cap_lock:

@@ -4,8 +4,9 @@ import { useQuery, useMutation } from '@tanstack/react-query'
 import {
   getMjpegStreamUrl, getVideoState,
   videoPause, videoSpeed, videoSeek, videoSeekTo, videoStep,
-  sseUrl, api,
+  sseUrl, api, counterSseUrl,
 } from '../lib/api'
+import type { CountingResult } from '../lib/types'
 import { Button } from '../components/ui/Button'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -24,6 +25,14 @@ interface ServiceResults {
   totalReports: number
   carCount: number
   rearCount: number
+}
+
+interface CounterState {
+  events: CountingResult[]
+  currentCount: number
+  totalIn: number
+  totalOut: number
+  lastSeen: number
 }
 
 const DIR_COLOR: Record<string, string> = {
@@ -134,24 +143,358 @@ function VideoControls({ name }: { name: string }) {
   )
 }
 
+// ── Combined right panel (Detection + Counter) ────────────────────────────────
+
+function CombinedRightPanel({ serviceName, results }: { serviceName: string; results: ServiceResults }) {
+  const counterName = `${serviceName}_counter`
+  const [counterData, setCounterData] = useState<CounterState>({ events: [], currentCount: 0, totalIn: 0, totalOut: 0, lastSeen: 0 })
+  const cntEsRef = useRef<EventSource | null>(null)
+
+  useEffect(() => {
+    api.get('/api/counting/results/all').then(r => {
+      const buf = r.data as Record<string, CountingResult[]>
+      const evts = (buf[counterName] ?? []).filter(e => e.event === 'car_passed')
+      if (evts.length) {
+        setCounterData({
+          events: evts,
+          currentCount: evts[0].count,
+          totalIn:  evts.filter(e => e.change > 0).length,
+          totalOut: evts.filter(e => e.change < 0).length,
+          lastSeen: Date.now(),
+        })
+      }
+    }).catch(() => {})
+
+    const es = new EventSource(counterSseUrl(counterName))
+    cntEsRef.current = es
+    es.onmessage = (e) => {
+      try {
+        const evt = JSON.parse(e.data) as CountingResult
+        if (evt.event !== 'car_passed') return
+        setCounterData(prev => ({
+          events: [evt, ...prev.events].slice(0, 200),
+          currentCount: evt.count,
+          totalIn:  prev.totalIn  + (evt.change > 0 ? 1 : 0),
+          totalOut: prev.totalOut + (evt.change < 0 ? 1 : 0),
+          lastSeen: Date.now(),
+        }))
+      } catch { /* ignore */ }
+    }
+    return () => { es.close(); cntEsRef.current = null }
+  }, [counterName])
+
+  const isDetLive = Date.now() - results.lastSeen < 5000
+  const isCntLive = Date.now() - counterData.lastSeen < 10000
+
+  return (
+    <div className="flex flex-col" style={{ width: '42%' }}>
+      {/* Counting stats */}
+      <div className="flex items-center gap-6 px-6 py-3 border-b border-[#1e293b] bg-teal-900/10 shrink-0">
+        <div className="flex items-center gap-2">
+          <div className={`w-2 h-2 rounded-full ${isCntLive ? 'bg-teal-400 animate-pulse' : 'bg-slate-600'}`} />
+          <span className="text-xs text-slate-500 font-medium">Parking</span>
+        </div>
+        <div className="flex flex-col items-center">
+          <span className="text-3xl font-bold text-teal-300 leading-none">{counterData.currentCount}</span>
+          <span className="text-xs text-slate-500 mt-1">🅿 Current</span>
+        </div>
+        <div className="w-px h-8 bg-slate-800" />
+        <div className="flex flex-col items-center">
+          <span className="text-2xl font-bold text-green-400 leading-none">+{counterData.totalIn}</span>
+          <span className="text-xs text-slate-600 mt-0.5">Entered</span>
+        </div>
+        <div className="flex flex-col items-center">
+          <span className="text-2xl font-bold text-orange-400 leading-none">−{counterData.totalOut}</span>
+          <span className="text-xs text-slate-600 mt-0.5">Exited</span>
+        </div>
+      </div>
+
+      {/* Detection stats */}
+      <div className="flex gap-6 px-6 py-3 border-b border-[#1e293b] bg-[#0f172a]/60 shrink-0">
+        {[
+          { label: 'Total Reports', value: results.totalReports, color: 'text-violet-400' },
+          { label: 'Car detected', value: results.carCount, color: 'text-green-400' },
+          { label: 'Rear detected', value: results.rearCount, color: 'text-blue-400' },
+        ].map(({ label, value, color }) => (
+          <div key={label} className="flex flex-col">
+            <span className={`text-2xl font-bold leading-tight ${color}`}>{value}</span>
+            <span className="text-xs text-slate-600 mt-0.5">{label}</span>
+          </div>
+        ))}
+        {results.results[0]?.car?.direction && (
+          <div className="flex flex-col">
+            <span className={`text-2xl font-bold leading-tight ${DIR_COLOR[results.results[0].car.direction] ?? 'text-slate-400'}`}>
+              {results.results[0].car.direction}
+            </span>
+            <span className="text-xs text-slate-600 mt-0.5">Last car dir</span>
+          </div>
+        )}
+        <div className="ml-auto flex items-center gap-2 self-start">
+          <div className={`w-2 h-2 rounded-full ${isDetLive ? 'bg-green-400 animate-pulse' : 'bg-slate-600'}`} />
+          <span className="text-xs text-slate-500">
+            {isDetLive ? new Date(results.lastSeen).toLocaleTimeString() : 'waiting…'}
+          </span>
+        </div>
+      </div>
+
+      {/* Detection table */}
+      <div className="flex-1 overflow-y-auto">
+        <table className="w-full text-sm">
+          <thead className="sticky top-0 bg-[#0f172a] z-10">
+            <tr className="border-b border-[#1e293b]">
+              {['TIME', 'GATE', 'CAR', 'CAR DIR', 'REAR', 'REAR DIR'].map(h => (
+                <th key={h} className="px-4 py-2.5 text-left text-xs font-bold text-slate-600 uppercase tracking-wider">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {results.results.slice(0, 200).map((r, i) => {
+              const gateOpen = r.gate?.open
+              const carDet = r.car?.detected
+              const rearDet = r.car_rear?.detected
+              return (
+                <tr key={i} className={`border-b border-[#1e293b]/40 transition-colors ${gateOpen ? 'bg-green-900/15' : 'hover:bg-[#1e293b]/30'}`}>
+                  <td className="px-4 py-2 text-slate-500 font-mono text-xs whitespace-nowrap">{r.timestamp ?? '—'}</td>
+                  <td className="px-4 py-2">
+                    {gateOpen
+                      ? <span className="text-green-400 font-bold text-xs bg-green-900/30 px-2 py-0.5 rounded">▲ OPEN</span>
+                      : <span className="text-slate-700">—</span>}
+                  </td>
+                  <td className="px-4 py-2">
+                    {carDet ? <span className="text-green-400 font-bold">●</span> : <span className="text-slate-700">○</span>}
+                  </td>
+                  <td className="px-4 py-2">{dirLabel(r.car?.direction, r.car?.confidence, carDet)}</td>
+                  <td className="px-4 py-2">
+                    {rearDet ? <span className="text-green-400 font-bold">●</span> : <span className="text-slate-700">○</span>}
+                  </td>
+                  <td className="px-4 py-2">{dirLabel(r.car_rear?.direction, r.car_rear?.confidence, rearDet)}</td>
+                </tr>
+              )
+            })}
+            {results.results.length === 0 && (
+              <tr>
+                <td colSpan={6} className="px-4 py-16 text-center text-slate-600">
+                  No results yet — start the service and wait for detections
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+// ── Counting right panel ──────────────────────────────────────────────────────
+
+function CountingRightPanel({ counterName }: { counterName: string }) {
+  const [data, setData] = useState<CounterState>({ events: [], currentCount: 0, totalIn: 0, totalOut: 0, lastSeen: 0 })
+  const esRef = useRef<EventSource | null>(null)
+
+  useEffect(() => {
+    api.get('/api/counting/results/all').then(r => {
+      const buf = r.data as Record<string, CountingResult[]>
+      const evts = (buf[counterName] ?? []).filter(e => e.event === 'car_passed')
+      if (evts.length) {
+        setData({
+          events: evts,
+          currentCount: evts[0].count,
+          totalIn:  evts.filter(e => e.change > 0).length,
+          totalOut: evts.filter(e => e.change < 0).length,
+          lastSeen: Date.now(),
+        })
+      }
+    }).catch(() => {})
+
+    const es = new EventSource(counterSseUrl(counterName))
+    esRef.current = es
+    es.onmessage = (e) => {
+      try {
+        const evt = JSON.parse(e.data) as CountingResult
+        if (evt.event !== 'car_passed') return
+        setData(prev => ({
+          events: [evt, ...prev.events].slice(0, 200),
+          currentCount: evt.count,
+          totalIn:  prev.totalIn  + (evt.change > 0 ? 1 : 0),
+          totalOut: prev.totalOut + (evt.change < 0 ? 1 : 0),
+          lastSeen: Date.now(),
+        }))
+      } catch { /* ignore */ }
+    }
+    return () => { es.close(); esRef.current = null }
+  }, [counterName])
+
+  const isLive = Date.now() - data.lastSeen < 10000
+
+  return (
+    <div className="flex flex-col" style={{ width: '42%' }}>
+      {/* Stats */}
+      <div className="flex items-end gap-10 px-6 py-5 border-b border-[#1e293b] bg-[#0f172a]/60 shrink-0">
+        <div className="flex flex-col items-center">
+          <span className="text-5xl font-bold text-teal-300 leading-none">{data.currentCount}</span>
+          <span className="text-xs text-slate-500 mt-2">🅿 On parking</span>
+        </div>
+        <div className="w-px h-12 bg-slate-800" />
+        <div className="flex flex-col items-center">
+          <span className="text-3xl font-bold text-green-400 leading-none">+{data.totalIn}</span>
+          <span className="text-xs text-slate-600 mt-1">Entered</span>
+        </div>
+        <div className="flex flex-col items-center">
+          <span className="text-3xl font-bold text-orange-400 leading-none">−{data.totalOut}</span>
+          <span className="text-xs text-slate-600 mt-1">Exited</span>
+        </div>
+        <div className="ml-auto flex items-center gap-2 self-start">
+          <div className={`w-2 h-2 rounded-full ${isLive ? 'bg-teal-400 animate-pulse' : 'bg-slate-600'}`} />
+          <span className="text-xs text-slate-500">
+            {isLive ? new Date(data.lastSeen).toLocaleTimeString() : 'waiting…'}
+          </span>
+        </div>
+      </div>
+
+      {/* Event table */}
+      <div className="flex-1 overflow-y-auto">
+        <table className="w-full text-sm">
+          <thead className="sticky top-0 bg-[#0f172a] z-10">
+            <tr className="border-b border-[#1e293b]">
+              {['TIME', 'EVENT', 'CLASS', 'CHANGE', 'COUNT'].map(h => (
+                <th key={h} className="px-4 py-2.5 text-left text-xs font-bold text-slate-600 uppercase tracking-wider">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {data.events.map((e, i) => (
+              <tr key={i} className={`border-b border-[#1e293b]/40 transition-colors ${e.change > 0 ? 'bg-green-900/10 hover:bg-green-900/20' : 'bg-orange-900/10 hover:bg-orange-900/20'}`}>
+                <td className="px-4 py-2 text-slate-500 font-mono text-xs whitespace-nowrap">
+                  {e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : '—'}
+                </td>
+                <td className="px-4 py-2">
+                  {e.change > 0
+                    ? <span className="text-green-400 font-bold text-xs bg-green-900/30 px-2 py-0.5 rounded">↑ IN</span>
+                    : <span className="text-orange-400 font-bold text-xs bg-orange-900/30 px-2 py-0.5 rounded">↓ OUT</span>}
+                </td>
+                <td className="px-4 py-2 text-slate-400 font-mono text-xs">{e.trigger_class}</td>
+                <td className="px-4 py-2">
+                  <span className={`font-bold ${e.change > 0 ? 'text-green-400' : 'text-orange-400'}`}>
+                    {e.change > 0 ? `+${e.change}` : e.change}
+                  </span>
+                </td>
+                <td className="px-4 py-2 text-teal-300 font-bold font-mono">{e.count}</td>
+              </tr>
+            ))}
+            {data.events.length === 0 && (
+              <tr>
+                <td colSpan={5} className="px-4 py-16 text-center text-slate-600">
+                  No counting events yet — start the service and wait
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+// ── Detection right panel ─────────────────────────────────────────────────────
+
+function DetectionRightPanel({ results }: { results: ServiceResults }) {
+  const isLive = Date.now() - results.lastSeen < 5000
+
+  return (
+    <div className="flex flex-col" style={{ width: '42%' }}>
+      <div className="flex gap-8 px-6 py-4 border-b border-[#1e293b] bg-[#0f172a]/60 shrink-0">
+        {[
+          { label: 'Total Reports', value: results.totalReports, color: 'text-violet-400' },
+          { label: 'Car detected', value: results.carCount, color: 'text-green-400' },
+          { label: 'Rear detected', value: results.rearCount, color: 'text-blue-400' },
+        ].map(({ label, value, color }) => (
+          <div key={label} className="flex flex-col">
+            <span className={`text-3xl font-bold leading-tight ${color}`}>{value}</span>
+            <span className="text-xs text-slate-600 mt-0.5">{label}</span>
+          </div>
+        ))}
+        {results.results[0]?.car?.direction && (
+          <div className="flex flex-col">
+            <span className={`text-3xl font-bold leading-tight ${DIR_COLOR[results.results[0].car.direction] ?? 'text-slate-400'}`}>
+              {results.results[0].car.direction}
+            </span>
+            <span className="text-xs text-slate-600 mt-0.5">Last car dir</span>
+          </div>
+        )}
+        <div className="ml-auto flex items-center gap-2 self-start">
+          <div className={`w-2 h-2 rounded-full ${isLive ? 'bg-green-400 animate-pulse' : 'bg-slate-600'}`} />
+          <span className="text-xs text-slate-500">
+            {isLive ? new Date(results.lastSeen).toLocaleTimeString() : 'waiting…'}
+          </span>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto">
+        <table className="w-full text-sm">
+          <thead className="sticky top-0 bg-[#0f172a] z-10">
+            <tr className="border-b border-[#1e293b]">
+              {['TIME', 'GATE', 'CAR', 'CAR DIR', 'REAR', 'REAR DIR'].map(h => (
+                <th key={h} className="px-4 py-2.5 text-left text-xs font-bold text-slate-600 uppercase tracking-wider">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {results.results.slice(0, 200).map((r, i) => {
+              const gateOpen = r.gate?.open
+              const carDet = r.car?.detected
+              const rearDet = r.car_rear?.detected
+              return (
+                <tr key={i} className={`border-b border-[#1e293b]/40 transition-colors ${gateOpen ? 'bg-green-900/15' : 'hover:bg-[#1e293b]/30'}`}>
+                  <td className="px-4 py-2 text-slate-500 font-mono text-xs whitespace-nowrap">{r.timestamp ?? '—'}</td>
+                  <td className="px-4 py-2">
+                    {gateOpen
+                      ? <span className="text-green-400 font-bold text-xs bg-green-900/30 px-2 py-0.5 rounded">▲ OPEN</span>
+                      : <span className="text-slate-700">—</span>}
+                  </td>
+                  <td className="px-4 py-2">
+                    {carDet ? <span className="text-green-400 font-bold">●</span> : <span className="text-slate-700">○</span>}
+                  </td>
+                  <td className="px-4 py-2">{dirLabel(r.car?.direction, r.car?.confidence, carDet)}</td>
+                  <td className="px-4 py-2">
+                    {rearDet ? <span className="text-green-400 font-bold">●</span> : <span className="text-slate-700">○</span>}
+                  </td>
+                  <td className="px-4 py-2">{dirLabel(r.car_rear?.direction, r.car_rear?.confidence, rearDet)}</td>
+                </tr>
+              )
+            })}
+            {results.results.length === 0 && (
+              <tr>
+                <td colSpan={6} className="px-4 py-16 text-center text-slate-600">
+                  No results yet — start the service and wait for detections
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export function PreviewPage() {
   const [params] = useSearchParams()
-  const name = params.get('service') ?? ''
-  const isVideo = params.get('mode') === 'video'
+  const name       = params.get('service') ?? ''
+  const isVideo    = params.get('mode') === 'video'
+  const isCounter  = params.get('kind') === 'counter'
+  const hasCounter = params.get('counter') === 'true'
 
-  // ── Frame feed ──
   const mjpegUrl = useMemo(() => name ? getMjpegStreamUrl(name) : '', [name])
 
-  // ── Results ──
+  // Detection results state (only used when not counter)
   const [results, setResults] = useState<ServiceResults>({
     results: [], lastSeen: 0, totalReports: 0, carCount: 0, rearCount: 0,
   })
   const esRef = useRef<EventSource | null>(null)
 
   useEffect(() => {
-    if (!name) return
+    if (!name || isCounter) return
 
     api.get('/api/detection/results/all').then(r => {
       const buf = r.data as Record<string, DetectionPayload[]>
@@ -197,9 +540,7 @@ export function PreviewPage() {
     }, 2000)
 
     return () => { es.close(); clearInterval(pollId) }
-  }, [name])
-
-  const isLive = Date.now() - results.lastSeen < 5000
+  }, [name, isCounter])
 
   if (!name) {
     return (
@@ -211,7 +552,6 @@ export function PreviewPage() {
 
   return (
     <div className="min-h-screen bg-[#0f172a] flex flex-col">
-      {/* Header */}
       <header className="flex items-center gap-3 px-5 py-3 border-b border-[#1e293b] shrink-0">
         <div className="w-7 h-7 rounded-lg bg-violet-600/20 border border-violet-500/30 flex items-center justify-center">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" strokeWidth="1.5">
@@ -221,20 +561,18 @@ export function PreviewPage() {
         </div>
         <span className="text-sm font-semibold text-slate-100">VisionQ</span>
         <span className="text-slate-600">—</span>
-        <div className="w-2 h-2 rounded-full bg-violet-400 animate-pulse" />
+        <div className={`w-2 h-2 rounded-full ${isCounter ? 'bg-teal-400' : 'bg-violet-400'} animate-pulse`} />
         <span className="text-sm text-slate-300 font-medium">{name}</span>
-        <div className="ml-auto flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${isLive ? 'bg-green-400 animate-pulse' : 'bg-slate-600'}`} />
-          <span className="text-xs text-slate-500">
-            {isLive ? `Live · ${new Date(results.lastSeen).toLocaleTimeString()}` : 'waiting…'}
-          </span>
-        </div>
+        {isCounter && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-teal-900/60 border border-teal-700/50 text-teal-300">Counter</span>
+        )}
+        {!isCounter && hasCounter && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-teal-900/60 border border-teal-700/50 text-teal-300">Detection + Counter</span>
+        )}
       </header>
 
-      {/* Body — two columns */}
       <div className="flex flex-1 overflow-hidden">
-
-        {/* ── Left: video feed ── */}
+        {/* Left: video feed */}
         <div className="flex flex-col border-r border-[#1e293b]" style={{ width: '58%' }}>
           <div className="flex-1 bg-black flex items-center justify-center overflow-hidden">
             {mjpegUrl && <img src={mjpegUrl} alt="preview" className="w-full h-full object-contain" />}
@@ -242,75 +580,13 @@ export function PreviewPage() {
           {isVideo && <VideoControls name={name} />}
         </div>
 
-        {/* ── Right: results ── */}
-        <div className="flex flex-col" style={{ width: '42%' }}>
-          {/* Stats */}
-          <div className="flex gap-8 px-6 py-4 border-b border-[#1e293b] bg-[#0f172a]/60 shrink-0">
-            {[
-              { label: 'Total Reports', value: results.totalReports, color: 'text-violet-400' },
-              { label: 'Car detected', value: results.carCount, color: 'text-green-400' },
-              { label: 'Rear detected', value: results.rearCount, color: 'text-blue-400' },
-            ].map(({ label, value, color }) => (
-              <div key={label} className="flex flex-col">
-                <span className={`text-3xl font-bold leading-tight ${color}`}>{value}</span>
-                <span className="text-xs text-slate-600 mt-0.5">{label}</span>
-              </div>
-            ))}
-            {results.results[0]?.car?.direction && (
-              <div className="flex flex-col">
-                <span className={`text-3xl font-bold leading-tight ${DIR_COLOR[results.results[0].car.direction] ?? 'text-slate-400'}`}>
-                  {results.results[0].car.direction}
-                </span>
-                <span className="text-xs text-slate-600 mt-0.5">Last car dir</span>
-              </div>
-            )}
-          </div>
-
-          {/* Table */}
-          <div className="flex-1 overflow-y-auto">
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-[#0f172a] z-10">
-                <tr className="border-b border-[#1e293b]">
-                  {['TIME', 'GATE', 'CAR', 'CAR DIR', 'REAR', 'REAR DIR'].map(h => (
-                    <th key={h} className="px-4 py-2.5 text-left text-xs font-bold text-slate-600 uppercase tracking-wider">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {results.results.slice(0, 200).map((r, i) => {
-                  const gateOpen = r.gate?.open
-                  const carDet = r.car?.detected
-                  const rearDet = r.car_rear?.detected
-                  return (
-                    <tr key={i} className={`border-b border-[#1e293b]/40 transition-colors ${gateOpen ? 'bg-green-900/15' : 'hover:bg-[#1e293b]/30'}`}>
-                      <td className="px-4 py-2 text-slate-500 font-mono text-xs whitespace-nowrap">{r.timestamp ?? '—'}</td>
-                      <td className="px-4 py-2">
-                        {gateOpen
-                          ? <span className="text-green-400 font-bold text-xs bg-green-900/30 px-2 py-0.5 rounded">▲ OPEN</span>
-                          : <span className="text-slate-700">—</span>}
-                      </td>
-                      <td className="px-4 py-2">
-                        {carDet ? <span className="text-green-400 font-bold">●</span> : <span className="text-slate-700">○</span>}
-                      </td>
-                      <td className="px-4 py-2">{dirLabel(r.car?.direction, r.car?.confidence, carDet)}</td>
-                      <td className="px-4 py-2">
-                        {rearDet ? <span className="text-green-400 font-bold">●</span> : <span className="text-slate-700">○</span>}
-                      </td>
-                      <td className="px-4 py-2">{dirLabel(r.car_rear?.direction, r.car_rear?.confidence, rearDet)}</td>
-                    </tr>
-                  )
-                })}
-                {results.results.length === 0 && (
-                  <tr>
-                    <td colSpan={6} className="px-4 py-16 text-center text-slate-600">
-                      No results yet — start the service and wait for detections
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        {/* Right: counting, combined, or detection panel */}
+        {isCounter
+          ? <CountingRightPanel counterName={`${name}_counter`} />
+          : hasCounter
+            ? <CombinedRightPanel serviceName={name} results={results} />
+            : <DetectionRightPanel results={results} />
+        }
       </div>
     </div>
   )

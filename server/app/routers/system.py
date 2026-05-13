@@ -41,10 +41,10 @@ def create_token(req: TokenCreateRequest, _user: dict = Depends(require_admin)):
     return {"label": req.label, "token": token, "created_at": datetime.now(timezone.utc).isoformat()}
 
 
-@router.delete("/tokens/{token}")
-def revoke_token(token: str, _user: dict = Depends(require_admin)):
+@router.delete("/tokens/{token_value}")
+def revoke_token(token_value: str, _user: dict = Depends(require_admin)):
     cfg = get_config()
-    if not cfg.revoke_token(token):
+    if not cfg.revoke_token(token_value):
         raise HTTPException(status_code=404, detail="Token not found.")
     return {"revoked": True}
 

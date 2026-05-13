@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getServices, duplicateService } from '../lib/api'
-import type { ServiceConfig } from '../lib/types'
+import { getServices, duplicateService, getCounters } from '../lib/api'
+import type { ServiceConfig, CountingConfig } from '../lib/types'
 import { ServiceCard } from '../components/detection/ServiceCard'
+import { CounterOnlyCard } from '../components/detection/CounterOnlyCard'
 import { ServiceForm } from '../components/detection/ServiceForm'
 import { PreviewWindow } from '../components/detection/PreviewWindow'
 import { ReceiverDashboard } from '../components/detection/ReceiverDashboard'
@@ -42,6 +43,7 @@ export function DetectionPage() {
   const nav = useNavigate()
   const [formOpen, setFormOpen] = useState(false)
   const [editTarget, setEditTarget] = useState<ServiceConfig | undefined>()
+  const [editCounterTarget, setEditCounterTarget] = useState<CountingConfig | undefined>()
   const [dupTarget, setDupTarget] = useState<ServiceConfig | null>(null)
   const [previewService, setPreviewService] = useState<ServiceConfig | null>(null)
   const [activeTab, setActiveTab] = useState<'services' | 'receiver'>('services')
@@ -52,12 +54,31 @@ export function DetectionPage() {
     refetchInterval: 2000,
   })
 
-  const openCreate = () => { setEditTarget(undefined); setFormOpen(true) }
-  const openEdit = (s: ServiceConfig) => { setEditTarget(s); setFormOpen(true) }
+  const { data: allCounters = [] } = useQuery<CountingConfig[]>({
+    queryKey: ['counters'],
+    queryFn: getCounters,
+    refetchInterval: 5000,
+  })
+
+  // Standalone counters: those whose name doesn't follow the "{detection_service}_counter" pattern
+  // for any known detection service
+  const detectionServiceNames = new Set(services.map(s => s.name))
+  const standaloneCounters = allCounters.filter(
+    c => !detectionServiceNames.has(c.name.replace(/_counter$/, '')) || !c.name.endsWith('_counter')
+  )
+
+  const openCreate = () => { setEditTarget(undefined); setEditCounterTarget(undefined); setFormOpen(true) }
+  const openEdit = (s: ServiceConfig) => { setEditTarget(s); setEditCounterTarget(undefined); setFormOpen(true) }
+  const openEditCounter = (c: CountingConfig) => { setEditTarget(undefined); setEditCounterTarget(c); setFormOpen(true) }
 
   return (
     <div className="min-h-screen bg-[#0f172a] flex flex-col">
-      <ServiceForm open={formOpen} onClose={() => setFormOpen(false)} existing={editTarget} />
+      <ServiceForm
+        open={formOpen}
+        onClose={() => setFormOpen(false)}
+        existing={editTarget}
+        existingCounter={editCounterTarget}
+      />
       {dupTarget && <DuplicateModal service={dupTarget} onClose={() => setDupTarget(null)} />}
       {previewService && (
         <PreviewWindow service={previewService} onClose={() => setPreviewService(null)} />
@@ -102,22 +123,31 @@ export function DetectionPage() {
 
             {isLoading ? (
               <div className="flex justify-center py-20"><Spinner size={28} /></div>
-            ) : services.length === 0 ? (
+            ) : services.length === 0 && standaloneCounters.length === 0 ? (
               <div className="flex flex-col items-center py-20 text-center gap-3">
                 <div className="w-14 h-14 rounded-2xl bg-slate-800 border border-slate-700 flex items-center justify-center text-2xl">⚡</div>
                 <p className="text-slate-400 text-sm">No detection services configured yet.</p>
                 <Button variant="primary" onClick={openCreate}>+ Add Service</Button>
               </div>
             ) : (
-              services.map(s => (
-                <ServiceCard
-                  key={s.name}
-                  service={s}
-                  onEdit={() => openEdit(s)}
-                  onDuplicate={() => setDupTarget(s)}
-                  onPreview={() => setPreviewService(s)}
-                />
-              ))
+              <>
+                {services.map(s => (
+                  <ServiceCard
+                    key={s.name}
+                    service={s}
+                    onEdit={() => openEdit(s)}
+                    onDuplicate={() => setDupTarget(s)}
+                    onPreview={() => setPreviewService(s)}
+                  />
+                ))}
+                {standaloneCounters.map(c => (
+                  <CounterOnlyCard
+                    key={c.name}
+                    counter={c}
+                    onEdit={() => openEditCounter(c)}
+                  />
+                ))}
+              </>
             )}
           </div>
         )}

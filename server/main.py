@@ -34,7 +34,7 @@ from fastapi.responses import FileResponse
 from app.config import init_config
 from app.version import VERSION
 import asyncio
-from app.routers import system, projects, annotations, detection, datasets, fs, auth, recordings, debug_logs
+from app.routers import system, projects, annotations, detection, datasets, fs, auth, recordings, debug_logs, counting
 from app.db import init_db
 
 logging.basicConfig(
@@ -53,7 +53,9 @@ def create_app(config_path: str | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         log.info(f"VisionQ Server v{VERSION} starting up")
         log.info(f"Config file: {cfg.path}")
-        detection.set_event_loop(asyncio.get_running_loop())
+        loop = asyncio.get_running_loop()
+        detection.set_event_loop(loop)
+        counting.set_event_loop(loop)
         from app.detection_service import get_registry
 
         def _on_auto_done(name: str, error: str):
@@ -63,6 +65,14 @@ def create_app(config_path: str | None = None) -> FastAPI:
                 log.info(f"[auto-start] {name}: running")
 
         get_registry().auto_start_services(_on_auto_done)
+
+        from app.counting_service import get_counting_registry
+        def _on_counter_auto_done(name: str, error: str):
+            if error:
+                log.error(f"[auto-start counter] {name}: {error}")
+            else:
+                log.info(f"[auto-start counter] {name}: running")
+        get_counting_registry().auto_start_services(_on_counter_auto_done)
 
         from app.tcp_push import get_tcp_registry
         for _cfg in get_registry().get_configs():
@@ -83,7 +93,9 @@ def create_app(config_path: str | None = None) -> FastAPI:
         yield
         log.info("VisionQ Server shutting down…")
         from app.tcp_push import get_tcp_registry
+        from app.counting_service import get_counting_registry as _get_counting_registry
         get_registry().stop_all()
+        _get_counting_registry().stop_all()
         get_tcp_registry().stop_all()
         log.info("All services stopped.")
 
@@ -110,6 +122,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
     app.include_router(projects.router)
     app.include_router(annotations.router)
     app.include_router(detection.router)
+    app.include_router(counting.router)
     app.include_router(datasets.router)
     app.include_router(fs.router)
     app.include_router(recordings.router)

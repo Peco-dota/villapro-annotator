@@ -105,6 +105,123 @@ def get_active_merge(_user: dict = Depends(require_user)):
     return {"active": True, **_active_merge_job, **job}
 
 
+# ── Auto-Annotate ─────────────────────────────────────────────────────────────
+
+class AutoAnnotateRequest(BaseModel):
+    project_path: str
+    model_path: str
+    confidence: float = 0.25
+    skip_annotated: bool = True
+
+
+@router.post("/auto-annotate")
+def start_auto_annotate(req: AutoAnnotateRequest, background_tasks: BackgroundTasks,
+                        _user: dict = Depends(require_user)):
+    if not os.path.isfile(req.model_path):
+        raise HTTPException(status_code=400, detail=f"Model file not found: {req.model_path}")
+
+    job_id = _new_job()
+    cancel_event = threading.Event()
+    _job_cancel[job_id] = cancel_event
+
+    def _run():
+        try:
+            import numpy as np
+            from PIL import Image
+            from ultralytics import YOLO
+            from app.project import Project
+            from app.annotation import BoundingBox, ImageAnnotation
+
+            p = Project.load(req.project_path)
+            images = p.images
+            _jobs[job_id]["total"] = len(images)
+
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    device = "cuda"
+                elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                    device = "mps"
+                else:
+                    device = "cpu"
+            except Exception:
+                device = "cpu"
+
+            model = YOLO(req.model_path)
+            model.to(device)
+
+            annotated = 0
+            boxes_total = 0
+
+            for i, filename in enumerate(images):
+                if cancel_event.is_set():
+                    _job_failed(job_id, "Cancelled")
+                    return
+
+                if req.skip_annotated:
+                    ann = p.annotations.get(filename)
+                    if ann and ann.boxes:
+                        _jobs[job_id]["progress"] = i + 1
+                        continue
+
+                img_path = p.image_path(filename)
+                if not os.path.exists(img_path):
+                    _jobs[job_id]["progress"] = i + 1
+                    continue
+
+                img = Image.open(img_path).convert("RGB")
+                img_w, img_h = img.size
+                img_np = np.array(img)
+
+                try:
+                    import torch as _torch
+                    with _torch.no_grad():
+                        results = model(img_np, conf=req.confidence, verbose=False)
+                except Exception:
+                    results = model(img_np, conf=req.confidence, verbose=False)
+
+                boxes = []
+                for result in results:
+                    for box in result.boxes:
+                        cls_id = int(box.cls[0])
+                        x1, y1, x2, y2 = box.xyxy[0].tolist()
+                        bb = BoundingBox.from_pixel(x1, y1, x2, y2, img_w, img_h, cls_id)
+                        if bb.is_valid():
+                            bb.confidence = float(box.conf[0])
+                            boxes.append(bb)
+
+                p.annotations[filename] = ImageAnnotation(filename=filename, boxes=boxes)
+                if boxes:
+                    annotated += 1
+                    boxes_total += len(boxes)
+
+                _jobs[job_id]["progress"] = i + 1
+
+            p.invalidate_annotated_count()
+            p.save(req.project_path)
+
+            # Evict stale in-memory cache so the next request reloads from disk
+            try:
+                from app.routers.projects import _open_projects
+                _open_projects.pop(req.project_path, None)
+            except Exception:
+                pass
+
+            _job_done(job_id, {
+                "images_annotated": annotated,
+                "boxes_created": boxes_total,
+                "total_images": len(images),
+            })
+        except Exception as e:
+            import traceback
+            _job_failed(job_id, f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
+        finally:
+            _job_cancel.pop(job_id, None)
+
+    background_tasks.add_task(_run)
+    return {"job_id": job_id}
+
+
 # ── YOLO Export ───────────────────────────────────────────────────────────────
 
 class ExportYoloRequest(BaseModel):
