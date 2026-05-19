@@ -143,6 +143,8 @@ class TcpPushServer:
             except ssl.SSLError as e:
                 if not self._stop_event.is_set():
                     log.warning(f"[{self.service_name}] SSL handshake failed: {e}")
+            except socket.timeout:
+                continue
             except OSError:
                 break
 
@@ -152,9 +154,7 @@ class TcpPushServer:
             self._stop_event.wait(timeout=_KEEPALIVE_INTERVAL)
             if self._stop_event.is_set():
                 break
-            with self._clients_lock:
-                if self._clients:
-                    self.push(keepalive)
+            self.push(keepalive)
 
 
 class TcpPushRegistry:

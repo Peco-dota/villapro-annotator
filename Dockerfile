@@ -41,6 +41,13 @@ RUN ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
 WORKDIR /app
 
 # Install Python dependencies
+# Pre-install CUDA-enabled PyTorch when building the GPU image so that
+# ultralytics (which depends on torch) doesn't pull the CPU build from PyPI.
+ARG CUDA_TORCH=false
+RUN if [ "$CUDA_TORCH" = "true" ]; then \
+      pip3 install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu121; \
+    fi
+
 COPY server/requirements.txt ./
 RUN pip3 install --no-cache-dir -r requirements.txt
 

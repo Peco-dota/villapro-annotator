@@ -107,7 +107,7 @@ def open_project(req: OpenProjectRequest, _user: dict = Depends(require_user)):
 
 class CreateProjectRequest(BaseModel):
     name: str
-    image_folder: str
+    image_folders: list[str]
     classes: list[str] = []
     save_path: Optional[str] = None   # if omitted, auto-saved to user's projects dir
     import_yolo_labels: bool = False
@@ -116,8 +116,11 @@ class CreateProjectRequest(BaseModel):
 
 @router.post("/create", status_code=201)
 def create_project(req: CreateProjectRequest, current_user: dict = Depends(require_user)):
-    if not os.path.isdir(req.image_folder):
-        raise HTTPException(status_code=400, detail="image_folder does not exist.")
+    if not req.image_folders:
+        raise HTTPException(status_code=400, detail="At least one image folder is required.")
+    for folder in req.image_folders:
+        if not os.path.isdir(folder):
+            raise HTTPException(status_code=400, detail=f"Folder does not exist: {folder}")
 
     # Determine save path
     if req.save_path:
@@ -131,7 +134,8 @@ def create_project(req: CreateProjectRequest, current_user: dict = Depends(requi
 
     p = Project()
     p.name = req.name
-    p.image_folder = req.image_folder
+    p.image_folders = req.image_folders
+    p.image_folder = req.image_folders[0]
     for cls_name in req.classes:
         p.add_class(cls_name)
     p.scan_images()
@@ -235,7 +239,7 @@ def get_image_file(path: str, filename: str, _user: dict = Depends(require_user)
 def delete_image(path: str, filename: str, _user: dict = Depends(require_user)):
     p = _get_project(path)
     img_path = p.image_path(filename)
-    label_path = os.path.join(p.image_folder, Path(filename).stem + ".txt")
+    label_path = str(Path(img_path).parent / (Path(img_path).stem + ".txt"))
 
     if filename not in p.images:
         raise HTTPException(status_code=404, detail="Image not in project.")
@@ -345,6 +349,7 @@ def _project_summary(p: Project) -> dict:
         "path": p.path,
         "name": p.name,
         "image_folder": p.image_folder,
+        "image_folders": p.image_folders,
         "total_images": p.total_count,
         "annotated_images": p.annotated_count,
         "total_boxes": p.total_box_count,

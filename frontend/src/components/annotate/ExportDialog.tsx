@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { exportYolo, exportCoco, augmentProject, saveProject } from '../../lib/api'
+import { exportYolo, exportCoco, saveProject } from '../../lib/api'
 import { Modal } from '../ui/Modal'
 import { Button } from '../ui/Button'
 import { PathInput } from '../ui/PathInput'
@@ -125,6 +125,11 @@ export function ExportDialog({ open, onClose, projectPath }: Props) {
   // Step 1: format + output
   const [format, setFormat] = useState<'yolo' | 'coco'>('yolo')
   const [outputDir, setOutputDir] = useState('')
+  const [datasetName, setDatasetName] = useState('')
+
+  const projectName = projectPath.split('/').pop()?.replace(/\.[^.]+$/, '') ?? 'dataset'
+  const effectiveName = datasetName.trim() || projectName
+  const effectiveOutputDir = outputDir ? `${outputDir.replace(/\/+$/, '')}/${effectiveName}` : ''
 
   // Step 2: augmentation
   const [doAugment, setDoAugment] = useState(false)
@@ -161,16 +166,13 @@ export function ExportDialog({ open, onClose, projectPath }: Props) {
 
   // Job tracking
   const [jobId, setJobId] = useState<string | null>(null)
-  const [augJobId, setAugJobId] = useState<string | null>(null)
   const job = useJobPoller(jobId)
-  const augJob = useJobPoller(augJobId)
 
   const reset = () => {
     setStep('format')
     setJobId(null)
-    setAugJobId(null)
+    setDatasetName('')
     exportMut.reset()
-    augMut.reset()
   }
 
   const split = doSplit ? {
@@ -179,12 +181,32 @@ export function ExportDialog({ open, onClose, projectPath }: Props) {
     test: testPct / 100,
   } : undefined
 
+  const augmentation = doAugment ? {
+    copies_per_image: copies,
+    flip_horizontal: augOpts.flip_horizontal,
+    flip_vertical: augOpts.flip_vertical,
+    brightness: augOpts.brightness,
+    brightness_range: [augOpts.brightness_min, augOpts.brightness_max],
+    contrast: augOpts.contrast,
+    contrast_range: [augOpts.contrast_min, augOpts.contrast_max],
+    saturation: augOpts.saturation,
+    saturation_range: [augOpts.saturation_min, augOpts.saturation_max],
+    blur: augOpts.blur,
+    blur_radius: augOpts.blur_radius,
+    noise: augOpts.noise,
+    noise_std: augOpts.noise_std,
+    rotation: augOpts.rotation,
+    rotation_degrees: augOpts.rotation_degrees,
+    only_annotated: augOpts.only_annotated,
+    output_original: augOpts.output_original,
+  } : undefined
+
   const exportMut = useMutation({
     mutationFn: async () => {
       await saveProject(projectPath)
       return format === 'yolo'
-        ? exportYolo({ project_path: projectPath, output_dir: outputDir, split, generate_yaml: !!doSplit })
-        : exportCoco({ project_path: projectPath, output_dir: outputDir })
+        ? exportYolo({ project_path: projectPath, output_dir: effectiveOutputDir, split, generate_yaml: !!doSplit, augmentation })
+        : exportCoco({ project_path: projectPath, output_dir: effectiveOutputDir })
     },
     onSuccess: (data) => {
       setJobId((data as { job_id: string }).job_id)
@@ -192,41 +214,7 @@ export function ExportDialog({ open, onClose, projectPath }: Props) {
     },
   })
 
-  const augMut = useMutation({
-    mutationFn: () => augmentProject({
-      project_path: projectPath,
-      output_dir: outputDir,
-      copies_per_image: copies,
-      flip_horizontal: augOpts.flip_horizontal,
-      flip_vertical: augOpts.flip_vertical,
-      brightness: augOpts.brightness,
-      brightness_range: [augOpts.brightness_min, augOpts.brightness_max],
-      contrast: augOpts.contrast,
-      contrast_range: [augOpts.contrast_min, augOpts.contrast_max],
-      saturation: augOpts.saturation,
-      saturation_range: [augOpts.saturation_min, augOpts.saturation_max],
-      blur: augOpts.blur,
-      blur_radius: augOpts.blur_radius,
-      noise: augOpts.noise,
-      noise_std: augOpts.noise_std,
-      rotation: augOpts.rotation,
-      rotation_degrees: augOpts.rotation_degrees,
-      only_annotated: augOpts.only_annotated,
-      output_original: augOpts.output_original,
-    }),
-    onSuccess: (data) => setAugJobId(data.job_id),
-  })
-
-  // After export job done, optionally kick off augmentation
-  const exportDone = job?.status === 'done'
-  const augDone = augJob?.status === 'done'
-  const augRunning = augJob?.status === 'running' || augMut.isPending
-
-  if (exportDone && doAugment && !augJobId && !augMut.isPending) {
-    augMut.mutate()
-  }
-
-  const allDone = exportDone && (!doAugment || augDone)
+  const allDone = job?.status === 'done'
 
   return (
     <Modal open={open} onClose={() => { reset(); onClose() }} title="Export Dataset" width="max-w-lg">
@@ -249,14 +237,30 @@ export function ExportDialog({ open, onClose, projectPath }: Props) {
             </div>
 
             <PathInput
-              label="Output directory"
+              label="Parent folder"
               value={outputDir}
               onChange={setOutputDir}
               filter="dir"
               dirOnly={true}
-              placeholder="/data/export/"
-              pickerTitle="Select export folder"
+              placeholder="/data/exports/"
+              pickerTitle="Select export parent folder"
             />
+
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs font-medium text-slate-400">Dataset name</label>
+              <input
+                value={datasetName}
+                onChange={e => setDatasetName(e.target.value)}
+                placeholder={projectName}
+                className="bg-[#0f172a] border border-[#334155] rounded px-3 py-1.5 text-sm text-slate-100
+                  placeholder:text-slate-600 focus:outline-none focus:border-violet-500 font-mono"
+              />
+              {outputDir && (
+                <p className="text-[11px] text-slate-500 font-mono">
+                  → <span className="text-slate-400">{effectiveOutputDir}</span>
+                </p>
+              )}
+            </div>
 
             <div className="flex gap-2 justify-end pt-1">
               <Button variant="ghost" onClick={() => { reset(); onClose() }}>Cancel</Button>
@@ -441,37 +445,26 @@ export function ExportDialog({ open, onClose, projectPath }: Props) {
         {/* ── Running / Done ── */}
         {step === 'running' && (
           <div className="flex flex-col gap-3">
-            {/* Export job */}
             <div className={`flex items-center gap-3 text-sm px-3 py-2.5 rounded
               ${job?.status === 'done' ? 'bg-green-900/20 text-green-300' : job?.status === 'failed' ? 'bg-red-900/20 text-red-300' : 'bg-slate-800 text-slate-300'}`}>
               {job?.status === 'running' || !job ? <Spinner size={14} /> : job.status === 'done' ? '✓' : '✗'}
               <span>
-                {!job ? 'Starting export…' :
-                 job.status === 'running' ? 'Exporting…' :
-                 job.status === 'done' ? `Export done — ${(job.result as { images?: number })?.images ?? 0} images, ${(job.result as { annotations?: number })?.annotations ?? 0} annotations` :
-                 `Export failed: ${job.error}`}
+                {!job ? 'Starting…' :
+                 job.status === 'running' ? (doAugment ? 'Exporting and augmenting…' : 'Exporting…') :
+                 job.status === 'done' ? (() => {
+                   const r = job.result as { images?: number; augmented?: number; annotations?: number }
+                   const parts = [`${r?.images ?? 0} images`]
+                   if (doAugment) parts.push(`${r?.augmented ?? 0} augmented`)
+                   parts.push(`${r?.annotations ?? 0} annotations`)
+                   return `Done — ${parts.join(', ')}`
+                 })() :
+                 `Failed: ${job.error}`}
               </span>
             </div>
 
-            {/* Augmentation job */}
-            {doAugment && (
-              <div className={`flex items-center gap-3 text-sm px-3 py-2.5 rounded
-                ${augJob?.status === 'done' ? 'bg-green-900/20 text-green-300' :
-                  augJob?.status === 'failed' ? 'bg-red-900/20 text-red-300' :
-                  augRunning ? 'bg-slate-800 text-slate-300' : 'bg-slate-800/50 text-slate-600'}`}>
-                {augRunning ? <Spinner size={14} /> : augJob?.status === 'done' ? '✓' : augJob?.status === 'failed' ? '✗' : <span className="w-3.5 h-3.5 rounded-full border border-slate-600 inline-block" />}
-                <span>
-                  {!augJob && !augRunning ? 'Augmentation (waiting for export…)' :
-                   augRunning ? 'Augmenting…' :
-                   augJob?.status === 'done' ? `Augmentation done — ${(augJob.result as { augmented?: number })?.augmented ?? 0} augmented images` :
-                   augJob?.status === 'failed' ? `Augmentation failed: ${augJob.error}` : ''}
-                </span>
-              </div>
-            )}
-
             {allDone && (
               <p className="text-xs text-slate-400 text-center">
-                Dataset saved to <span className="font-mono text-slate-300">{outputDir}</span>
+                Dataset saved to <span className="font-mono text-slate-300">{effectiveOutputDir}</span>
               </p>
             )}
 

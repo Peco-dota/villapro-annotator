@@ -167,6 +167,37 @@ function EpochProgress({ epoch, total }: { epoch: number; total: number }) {
   )
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function fmtDuration(sec: number): string {
+  if (sec < 60) return `${Math.round(sec)}s`
+  const m = Math.floor(sec / 60), s = Math.round(sec % 60)
+  if (m < 60) return s > 0 ? `${m}m ${s}s` : `${m}m`
+  const h = Math.floor(m / 60), rm = m % 60
+  return rm > 0 ? `${h}h ${rm}m` : `${h}h`
+}
+
+type Metrics = { precision: number; recall: number; mAP50: number; 'mAP50-95': number }
+
+function LiveMetrics({ metrics }: { metrics: Metrics }) {
+  const items = [
+    { label: 'mAP50',    value: metrics.mAP50,          color: 'text-violet-400' },
+    { label: 'mAP50-95', value: metrics['mAP50-95'],    color: 'text-violet-300' },
+    { label: 'Precision', value: metrics.precision,     color: 'text-sky-400' },
+    { label: 'Recall',   value: metrics.recall,         color: 'text-teal-400' },
+  ]
+  return (
+    <div className="grid grid-cols-4 gap-2">
+      {items.map(({ label, value, color }) => (
+        <div key={label} className="flex flex-col items-center gap-0.5 bg-slate-800/60 rounded-lg py-2.5">
+          <span className={`text-sm font-bold font-mono ${color}`}>{value.toFixed(3)}</span>
+          <span className="text-[10px] text-slate-500 uppercase tracking-wider">{label}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // ── Active training banner (shown when navigating away) ───────────────────────
 
 function StopButtons({ disabled }: { disabled: boolean }) {
@@ -242,6 +273,8 @@ export function TrainModel() {
   })
   const [logs, setLogs] = useState<string[]>([])
   const [logDone, setLogDone] = useState(false)
+  const [logOpen, setLogOpen] = useState(false)
+  const [now, setNow] = useState(() => Date.now())
   const logRef = useRef<HTMLDivElement>(null)
   const esRef = useRef<EventSource | null>(null)
 
@@ -265,8 +298,32 @@ export function TrainModel() {
   const isFailed  = job?.status === 'failed'
   const result    = job?.result as { best_model?: string; run_name?: string; output_dir?: string } | null
 
-  const epoch      = job?.epoch ?? activeData?.epoch ?? 0
-  const totalEpochs = job?.total_epochs ?? activeData?.total_epochs ?? epochs
+  const epoch        = job?.epoch ?? activeData?.epoch ?? 0
+  const totalEpochs  = job?.total_epochs ?? activeData?.total_epochs ?? epochs
+  const lastMetrics  = (job?.last_metrics ?? activeData?.last_metrics) as Metrics | null | undefined
+  const curBatch     = job?.batch ?? activeData?.batch ?? 0
+  const totalBatches = job?.total_batches ?? activeData?.total_batches ?? 0
+
+  const epochStartAt       = (job?.epoch_start_at        ?? activeData?.epoch_start_at)        as string | undefined
+  const lastEpochDurationS = (job?.last_epoch_duration_s ?? activeData?.last_epoch_duration_s) as number | undefined
+
+  // Use last measured epoch duration as the per-epoch estimate — accurate and
+  // doesn't drift upward while waiting between epochs like elapsed-time approaches do.
+  const remaining = lastEpochDurationS !== undefined && epoch < totalEpochs
+    ? lastEpochDurationS * (totalEpochs - epoch)
+    : null
+
+  // Within-epoch ETA from batch timing
+  const epochElapsed   = epochStartAt && isRunning && curBatch > 0 ? (now - Date.parse(epochStartAt)) / 1000 : null
+  const batchesPerSec  = epochElapsed && curBatch > 0 ? curBatch / epochElapsed : null
+  const epochRemaining = batchesPerSec && totalBatches > curBatch ? (totalBatches - curBatch) / batchesPerSec : null
+
+  // Smooth combined progress: completed epochs + fraction through current epoch
+  const smoothPct = totalEpochs > 0
+    ? totalBatches > 0 && isRunning
+      ? ((epoch + curBatch / totalBatches) / totalEpochs) * 100
+      : (epoch / totalEpochs) * 100
+    : 0
 
   // If server has an active job but we lost our local jobId (page refresh), re-attach
   useEffect(() => {
@@ -311,6 +368,18 @@ export function TrainModel() {
     if (isDone || isFailed) localStorage.removeItem(STORAGE_KEY)
   }, [isDone, isFailed])
 
+  // Tick every second while running for live time display
+  useEffect(() => {
+    if (!isRunning) return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [isRunning])
+
+  // Auto-open log when job finishes so the user can see the result
+  useEffect(() => {
+    if (isDone || isFailed) setLogOpen(true)
+  }, [isDone, isFailed])
+
   const mut = useMutation({
     mutationFn: () => trainModel({
       data_yaml: dataYaml,
@@ -339,7 +408,7 @@ export function TrainModel() {
     !isRunning
 
   // Server has a running job that isn't ours — show compact banner
-  const serverHasOtherJob = activeData?.active && activeData.job_id !== jobId && !jobId
+  const serverHasOtherJob = activeData?.active && activeData?.status === 'running' && activeData.job_id !== jobId && !jobId
 
   return (
     <div className="flex flex-col gap-5 max-w-2xl">
@@ -350,16 +419,6 @@ export function TrainModel() {
           Best weights are saved to <span className="font-mono text-slate-400">/villapro-data/models/&lt;run-name&gt;/weights/best.pt</span>.
         </p>
       </div>
-
-      {/* Active training banner — when navigating back after starting a job */}
-      {isRunning && logs.length === 0 && !logDone && (
-        <ActiveBanner
-          runName={activeData?.run_name ?? runName}
-          epoch={epoch}
-          total={totalEpochs}
-          onAttach={() => {}}
-        />
-      )}
 
       {/* Banner for a job started from another session */}
       {serverHasOtherJob && (
@@ -438,93 +497,162 @@ export function TrainModel() {
         </>
       )}
 
-      {/* ── Log + progress (shown while running or after) ── */}
+      {/* ── Training status card (running / done / failed) ── */}
       {(jobId || logs.length > 0) && (
-        <div className="bg-[#16213e] border border-[#1e293b] rounded-xl p-4 flex flex-col gap-3">
-          <div className="flex items-center justify-between">
-            <SectionHeader label="Training Log" />
-            <div className="flex items-center gap-3">
-              {isRunning && !logDone && <Spinner size={14} />}
-              {isDone && <span className="text-xs text-green-400 font-medium">✓ Complete</span>}
-              {isFailed && <span className="text-xs text-red-400 font-medium">✕ Failed</span>}
+        <div className="flex flex-col gap-2">
+          {/* Main status card */}
+          <div className={`border rounded-xl p-4 flex flex-col gap-3 ${
+            isDone    ? 'bg-green-950/30 border-green-700/40' :
+            isFailed  ? 'bg-red-950/20 border-red-700/40' :
+                        'bg-violet-900/10 border-violet-500/30'
+          }`}>
+            {/* Header */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 min-w-0">
+                {isRunning && <div className="w-2 h-2 rounded-full bg-violet-400 animate-pulse shrink-0" />}
+                {isDone    && <span className="text-green-400 shrink-0">✓</span>}
+                {isFailed  && <span className="text-red-400 shrink-0">✕</span>}
+                <span className="text-sm font-semibold text-slate-200">
+                  {isRunning ? 'Training in progress' :
+                   isDone    ? 'Training complete' :
+                   (job?.error?.includes('Cancelled') || job?.error?.includes('Force-stopped'))
+                     ? 'Training cancelled' : 'Training failed'}
+                </span>
+                <span className="text-xs text-slate-500 font-mono truncate">
+                  {activeData?.run_name ?? runName}
+                </span>
+              </div>
+              {isRunning && <StopButtons disabled={false} />}
             </div>
-          </div>
 
-          {/* Progress bar — shown while running */}
-          {isRunning && totalEpochs > 0 && (
-            <EpochProgress epoch={epoch} total={totalEpochs} />
-          )}
+            {/* Progress bar + time */}
+            {totalEpochs > 0 && (
+              <div className="flex flex-col gap-1.5">
+                <div className="h-3 bg-slate-700/60 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-300 ${isDone ? 'bg-green-500' : 'bg-violet-500'}`}
+                    style={{ width: `${smoothPct}%` }}
+                  />
+                </div>
+                <div className="flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-slate-400">Epoch {epoch} / {totalEpochs}</span>
+                    {isRunning && totalBatches > 0 && (
+                      <span className="text-slate-600">
+                        · batch {curBatch} / {totalBatches}
+                        {batchesPerSec && batchesPerSec > 0 && (
+                          <span className="text-slate-700 ml-1">({batchesPerSec.toFixed(1)} it/s)</span>
+                        )}
+                        {epochRemaining !== null && (
+                          <span className="text-slate-600 ml-1">· ~{fmtDuration(epochRemaining)} left in epoch</span>
+                        )}
+                      </span>
+                    )}
+                    {epoch === 0 && isRunning && totalBatches === 0 && (
+                      <span className="text-slate-600">— loading dataset…</span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    {remaining !== null && (
+                      <span className="text-slate-500">~{fmtDuration(remaining)} remaining</span>
+                    )}
+                    {lastEpochDurationS !== undefined && (
+                      <span className="text-slate-600">last epoch {fmtDuration(lastEpochDurationS)}</span>
+                    )}
+                    <span className={`font-medium ${isDone ? 'text-green-400' : 'text-violet-400'}`}>
+                      {Math.round(smoothPct)}%
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
 
-          <div ref={logRef}
-            className="bg-[#0a0f1e] rounded-lg p-3 font-mono text-xs text-slate-300 overflow-y-auto"
-            style={{ minHeight: 160, maxHeight: 400 }}
-          >
-            {logs.length === 0 ? (
-              <span className="text-slate-600">Waiting for output…</span>
-            ) : (
-              logs.map((line, i) => {
-                let cls = 'text-slate-400'
-                if (line.startsWith('ERROR')) cls = 'text-red-400'
-                else if (line.startsWith('Complete')) cls = 'text-green-400'
-                else if (line.startsWith('Training cancelled')) cls = 'text-yellow-400'
-                else if (line.startsWith('[')) cls = 'text-slate-200'
-                else if (line.startsWith('─')) cls = 'text-slate-700'
-                else if (/^(Model|Dataset|Config|Device|Output)/.test(line)) cls = 'text-violet-300'
-                return <div key={i} className={cls}>{line}</div>
-              })
+            {/* Live metrics — shown after first epoch */}
+            {lastMetrics && <LiveMetrics metrics={lastMetrics} />}
+
+            {/* Best model path */}
+            {isDone && result?.best_model && (
+              <div className="px-3 py-2 bg-green-900/20 border border-green-700/50 rounded-lg text-xs text-green-300">
+                Best weights → <span className="font-mono">{result.best_model}</span>
+              </div>
+            )}
+
+            {/* Failed extra info */}
+            {isFailed && (
+              <>
+                {job?.error && !job.error.includes('Cancelled') && !job.error.includes('Force-stopped') && (
+                  <p className="text-xs text-red-400 font-mono">{job.error}</p>
+                )}
+                {epoch > 0 && (
+                  <p className="text-xs text-slate-500">
+                    YOLO may have saved intermediate weights from the last completed epoch in the run folder.
+                  </p>
+                )}
+              </>
+            )}
+
+            {/* New run button */}
+            {(isDone || isFailed) && (
+              <div className="flex justify-end">
+                <Button variant={isDone ? 'ghost' : 'primary'} size="sm" onClick={reset}>
+                  {isDone ? 'New training run' : 'Start new run'}
+                </Button>
+              </div>
             )}
           </div>
 
-          {isDone && result?.best_model && (
-            <div className="px-3 py-2 bg-green-900/20 border border-green-700/50 rounded-lg text-xs text-green-300">
-              ✓ Best weights saved to: <span className="font-mono">{result.best_model}</span>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── Cancelled / Failed summary card ── */}
-      {isFailed && (
-        <div className="bg-[#16213e] border border-red-700/40 rounded-xl p-4 flex flex-col gap-3">
-          <div className="flex items-center gap-2">
-            <span className="text-red-400 text-sm">■</span>
-            <span className="text-sm font-semibold text-red-300">
-              {job?.error?.includes('cancel') || logs.some(l => l.toLowerCase().includes('cancel'))
-                ? 'Training cancelled'
-                : 'Training failed'}
-            </span>
-            {epoch > 0 && (
-              <span className="text-xs text-slate-500 ml-1">
-                — stopped at epoch {epoch} of {totalEpochs}
-              </span>
+          {/* Collapsible log */}
+          <div className="bg-[#16213e] border border-[#1e293b] rounded-xl overflow-hidden">
+            <button
+              onClick={() => setLogOpen(o => !o)}
+              className="w-full flex items-center justify-between px-4 py-2.5 hover:bg-[#1a2744] transition-colors cursor-pointer"
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Training Log</span>
+                {logs.length > 0 && (
+                  <span className="text-xs text-slate-700">{logs.length} lines</span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {isRunning && !logDone && <Spinner size={12} />}
+                <span className="text-xs text-slate-600">{logOpen ? '▲' : '▼'}</span>
+              </div>
+            </button>
+            {logOpen && (
+              <div className="px-4 pb-4">
+                <div ref={logRef}
+                  className="bg-[#0a0f1e] rounded-lg p-3 font-mono text-xs text-slate-300 overflow-y-auto"
+                  style={{ minHeight: 160, maxHeight: 400 }}
+                >
+                  {logs.length === 0 ? (
+                    <span className="text-slate-600">Waiting for output…</span>
+                  ) : (
+                    logs.map((line, i) => {
+                      let cls = 'text-slate-400'
+                      if (line.startsWith('ERROR')) cls = 'text-red-400'
+                      else if (line.startsWith('Complete')) cls = 'text-green-400'
+                      else if (line.startsWith('Training cancelled')) cls = 'text-yellow-400'
+                      else if (line.startsWith('[')) cls = 'text-slate-200'
+                      else if (line.startsWith('─')) cls = 'text-slate-700'
+                      else if (/^(Model|Dataset|Config|Device|Output)/.test(line)) cls = 'text-violet-300'
+                      return <div key={i} className={cls}>{line}</div>
+                    })
+                  )}
+                </div>
+              </div>
             )}
-          </div>
-          {job?.error && !job.error.includes('cancel') && (
-            <p className="text-xs text-red-400 font-mono">{job.error}</p>
-          )}
-          {epoch > 0 && (
-            <p className="text-xs text-slate-500">
-              YOLO may have saved intermediate weights from the last completed epoch in the run folder.
-            </p>
-          )}
-          <div className="flex justify-end">
-            <Button variant="primary" onClick={reset}>Start new run</Button>
           </div>
         </div>
       )}
 
       {/* ── Actions ── */}
-      <div className="flex gap-2 justify-end">
-        {isDone && (
-          <Button variant="ghost" onClick={reset}>New training run</Button>
-        )}
-        {isRunning && <StopButtons disabled={false} />}
-        {!isRunning && !isDone && !isFailed && (
+      {!isRunning && !isDone && !isFailed && (
+        <div className="flex gap-2 justify-end">
           <Button variant="primary" disabled={!canRun || mut.isPending} onClick={() => mut.mutate()}>
             {mut.isPending ? <><Spinner size={12} /> Starting…</> : '⚡ Start Training'}
           </Button>
-        )}
-      </div>
+        </div>
+      )}
 
       <TrainHistory onUseModel={(path) => {
         setModelPreset('__custom__')

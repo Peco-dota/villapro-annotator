@@ -10,7 +10,6 @@ interface Props {
   boxes: BoundingBox[]
   classes: ClassDef[]
   selectedClass: number
-  tool: 'draw' | 'select'
   selectedBoxId: string | null
   onSelectBox: (id: string | null) => void
   onBoxesChange: (boxes: BoundingBox[]) => void
@@ -99,7 +98,7 @@ function ClassPickerPopup({ classes, screenX, screenY, onPick, onCancel }: {
 }
 
 export function AnnotationCanvas({
-  projectPath, filename, boxes, classes, selectedClass, tool,
+  projectPath, filename, boxes, classes, selectedClass,
   selectedBoxId, onSelectBox, onBoxesChange, onSelectClass,
   zoom, onZoomChange, onFitScaleChange,
 }: Props) {
@@ -175,15 +174,17 @@ export function AnnotationCanvas({
 
   const handleMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
     if (pending) return
-    // Middle-click or space+left = pan
+    // Middle-click or alt+left = pan
     if (e.evt.button === 1 || (e.evt.button === 0 && e.evt.altKey)) {
       isPanning.current = true
       panStart.current = { x: e.evt.clientX, y: e.evt.clientY }
       panOffsetStart.current = { ...panOffset }
       return
     }
-    if (tool !== 'draw') return
     if (!img) return
+    // Only draw when clicking on empty space (stage background or bg image), not on a box
+    const isEmptySpace = e.target === e.target.getStage() || e.target.id() === 'bg-image'
+    if (!isEmptySpace) return
     const pos = e.target.getStage()!.getPointerPosition()!
     setDrawing({ x: pos.x, y: pos.y })
     setDraft(null)
@@ -254,7 +255,7 @@ export function AnnotationCanvas({
   }, [pending, boxes, onBoxesChange, onSelectBox, onSelectClass])
 
   const handleBoxClick = (id: string) => {
-    if (tool === 'select') onSelectBox(id === selectedBoxId ? null : id)
+    onSelectBox(id === selectedBoxId ? null : id)
   }
 
   const handleBoxTransformEnd = (id: string, node: Konva.Rect) => {
@@ -289,7 +290,7 @@ export function AnnotationCanvas({
   })
 
   const draftColor = getColor(pending ? pending.box.class_index : selectedClass)
-  const cursor = isPanning.current ? 'grabbing' : tool === 'draw' ? 'crosshair' : 'default'
+  const cursor = isPanning.current ? 'grabbing' : 'crosshair'
 
   return (
     <div ref={containerRef} className="flex-1 overflow-hidden relative" style={{ background: '#2a2a2a', cursor }}>
@@ -306,6 +307,7 @@ export function AnnotationCanvas({
         <Layer>
           {img && (
             <KonvaImage
+              id="bg-image"
               image={img}
               x={offset.x} y={offset.y}
               width={naturalW * scale}
@@ -324,7 +326,7 @@ export function AnnotationCanvas({
                 stroke={color}
                 strokeWidth={selectedBoxId === b.id ? 2 : 1.5}
                 fill={selectedBoxId === b.id ? color + '22' : color + '11'}
-                draggable={tool === 'select'}
+                draggable={selectedBoxId === b.id}
                 onClick={() => handleBoxClick(b.id)}
                 onDragEnd={e => handleDragEnd(b.id, e.target as Konva.Rect)}
                 onTransformEnd={e => handleBoxTransformEnd(b.id, e.target as Konva.Rect)}

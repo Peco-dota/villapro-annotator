@@ -52,7 +52,7 @@ export const openProject = (path: string) => api.post('/api/projects/open', { pa
 export const createProject = (data: {
   name: string
   save_path: string
-  image_folder: string
+  image_folders: string[]
   classes?: string[]
   import_yolo_labels?: boolean
   coco_json_path?: string
@@ -150,10 +150,14 @@ export const videoPause = (name: string) =>
   api.post(`/api/detection/services/${name}/video/pause`).then(r => r.data)
 export const videoStep = (name: string) =>
   api.post(`/api/detection/services/${name}/video/step`).then(r => r.data)
+export const videoReverse = (name: string) =>
+  api.post(`/api/detection/services/${name}/video/reverse`).then(r => r.data)
 export const getVideoState = (name: string) =>
   api.get(`/api/detection/services/${name}/video/state`).then(r => r.data)
 export const clearAllResults = () =>
   api.delete('/api/detection/results/all').then(r => r.data)
+export const clearServiceResults = (name: string) =>
+  api.delete(`/api/detection/results/${name}`).then(r => r.data)
 // TCP push
 export const startTcpPush = (name: string, data: object) =>
   api.post(`/api/detection/services/${name}/tcp/start`, data).then(r => r.data)
@@ -172,7 +176,7 @@ export const resetCounter = (name: string) => api.post(`/api/counting/services/$
 export const counterSseUrl = (name: string): string => sseUrl(`/api/counting/services/${name}/stream`)
 
 // ── Filesystem ───────────────────────────────────────────────────────────────
-export type FsFilter = 'any' | 'project' | 'images_dir' | 'model' | 'video' | 'yaml' | 'dir'
+export type FsFilter = 'any' | 'project' | 'images_dir' | 'model' | 'video' | 'yaml' | 'dir' | '*'
 
 export interface FileEntry {
   name: string
@@ -257,13 +261,25 @@ export const getDebugLogDownloadUrl = (path: string): string => {
 export const fsMkdir = (parent: string, name: string): Promise<{ path: string }> =>
   api.post('/api/fs/mkdir', { parent, name }).then(r => r.data)
 
+export const fsDelete = (path: string, recursive = false): Promise<{ deleted: string }> =>
+  api.delete('/api/fs/delete', { data: { path, recursive } }).then(r => r.data)
+
+export const fsMove = (src: string, dest: string): Promise<{ src: string; dest: string }> =>
+  api.post('/api/fs/move', { src, dest }).then(r => r.data)
+
+export const fsDownloadUrl = (path: string): string => {
+  const token = localStorage.getItem('visionq_token') ?? ''
+  const base = (import.meta.env.VITE_API_URL as string) || ''
+  return `${base}/api/fs/download?path=${encodeURIComponent(path)}&token=${encodeURIComponent(token)}`
+}
+
 // ── Datasets ──────────────────────────────────────────────────────────────────
 export const exportYolo = (data: object) => api.post('/api/datasets/export/yolo', data).then(r => r.data)
 export const exportCoco = (data: object) => api.post('/api/datasets/export/coco', data).then(r => r.data)
 export const exportBatch = (data: {
   sources: string[]
   output_dir: string
-  split?: { train: number; val: number; test: number }
+  split?: { train: number; val: number; test?: number }
   generate_yaml?: boolean
   augmentation?: object | null
 }) => api.post('/api/datasets/export/batch', data).then(r => r.data)
@@ -274,10 +290,11 @@ export const getActiveTrain = () => api.get('/api/datasets/train/active').then(r
 export const trainLogUrl = (jobId: string): string => sseUrl(`/api/datasets/train/log/${jobId}`)
 export const getJob = (job_id: string) => api.get(`/api/datasets/jobs/${job_id}`).then(r => r.data)
 export const cancelJob = (job_id: string) => api.post(`/api/datasets/jobs/${job_id}/cancel`).then(r => r.data)
-export const autoAnnotate = (data: { project_path: string; model_path: string; confidence: number; skip_annotated: boolean }) =>
+export const autoAnnotate = (data: { project_path: string; model_path: string; confidence: number; iou: number; skip_annotated: boolean }) =>
   api.post('/api/datasets/auto-annotate', data).then(r => r.data)
 export const getActiveAugJob = () => api.get('/api/datasets/augment/active').then(r => r.data)
 export const getActiveMergeJob = () => api.get('/api/datasets/merge/active').then(r => r.data)
+export const dismissMergeJob = () => api.delete('/api/datasets/merge/active').then(r => r.data)
 
 export interface TrainHistoryEntry {
   job_id: string

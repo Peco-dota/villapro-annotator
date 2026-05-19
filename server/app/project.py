@@ -39,7 +39,8 @@ class Project:
     def __init__(self):
         self.path: Optional[str] = None
         self.name: str = "Untitled Project"
-        self.image_folder: str = ""
+        self.image_folders: list[str] = []
+        self.image_folder: str = ""  # always == image_folders[0] (or "" if empty)
         self.images: list[str] = []
         self.classes: list[ClassDef] = []
         self.annotations: dict[str, ImageAnnotation] = {}
@@ -56,12 +57,17 @@ class Project:
         }
 
     def scan_images(self) -> int:
-        if not self.image_folder or not os.path.isdir(self.image_folder):
-            return 0
-        found = []
-        for f in sorted(os.listdir(self.image_folder)):
-            if Path(f).suffix.lower() in IMAGE_EXTENSIONS:
-                found.append(f)
+        seen: set[str] = set()
+        found: list[str] = []
+        for folder in self.image_folders:
+            if not folder or not os.path.isdir(folder):
+                continue
+            for f in sorted(os.listdir(folder)):
+                if Path(f).suffix.lower() in IMAGE_EXTENSIONS:
+                    full = os.path.normpath(os.path.join(folder, f))
+                    if full not in seen:
+                        seen.add(full)
+                        found.append(full)
         self.images = found
         for fn in self.images:
             if fn not in self.annotations:
@@ -69,6 +75,9 @@ class Project:
         return len(self.images)
 
     def image_path(self, filename: str) -> str:
+        if os.path.isabs(filename):
+            return filename
+        # backward compat: bare filename from old single-folder project
         return os.path.join(self.image_folder, filename)
 
     def current_image_filename(self) -> Optional[str]:
@@ -140,6 +149,7 @@ class Project:
         return {
             "name": self.name,
             "image_folder": self.image_folder,
+            "image_folders": self.image_folders,
             "classes": [c.to_dict() for c in self.classes],
             "annotations": {fn: ia.to_dict() for fn, ia in self.annotations.items()},
             "current_index": self.current_index,
@@ -150,12 +160,26 @@ class Project:
     def from_dict(cls, d: dict) -> "Project":
         p = cls()
         p.name = d.get("name", "Untitled Project")
-        p.image_folder = d.get("image_folder", "")
+        # Support both new multi-folder and old single-folder format
+        image_folders = d.get("image_folders")
+        if image_folders:
+            p.image_folders = image_folders
+            p.image_folder = image_folders[0] if image_folders else ""
+        else:
+            p.image_folder = d.get("image_folder", "")
+            p.image_folders = [p.image_folder] if p.image_folder else []
         p.classes = [ClassDef.from_dict(c) for c in d.get("classes", [])]
-        p.annotations = {
-            fn: ImageAnnotation.from_dict(ia)
-            for fn, ia in d.get("annotations", {}).items()
-        }
+        # Migrate old bare-filename annotation keys to absolute paths
+        raw = d.get("annotations", {})
+        p.annotations = {}
+        for k, v in raw.items():
+            if not os.path.isabs(k) and p.image_folder:
+                abs_k = os.path.normpath(os.path.join(p.image_folder, k))
+                ia = ImageAnnotation.from_dict(v)
+                ia.filename = abs_k
+                p.annotations[abs_k] = ia
+            else:
+                p.annotations[k] = ImageAnnotation.from_dict(v)
         p.current_index = d.get("current_index", 0)
         p.settings.update(d.get("settings", {}))
         return p
@@ -184,7 +208,7 @@ class Project:
 
     def load_yolo_labels(self):
         for fn in self.images:
-            label_path = os.path.join(self.image_folder, Path(fn).stem + ".txt")
+            label_path = str(Path(fn).parent / (Path(fn).stem + ".txt"))
             if os.path.exists(label_path):
                 boxes = []
                 with open(label_path) as f:

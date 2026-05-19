@@ -11,7 +11,8 @@
     "tcp_push_ca_certs": "",
     "initial_count": 0,
     "output_host": "",
-    "output_port": 0
+    "output_port": 0,
+    "no_car_grace_ms": 1500
   },
   {
     "name": "test02-stream_counter",
@@ -25,6 +26,37 @@
     "tcp_push_ca_certs": "",
     "initial_count": 0,
     "output_host": "",
-    "output_port": 0
+    "output_port": 0,
+    "no_car_grace_ms": 1500
+  },
+  {
+    "name": "test03-video_novum_counter",
+    "source_service": "test03-video_novum",
+    "auto_start": false,
+    "tcp_push_enabled": false,
+    "tcp_push_host": "0.0.0.0",
+    "tcp_push_port": 0,
+    "tcp_push_certfile": "",
+    "tcp_push_keyfile": "",
+    "tcp_push_ca_certs": "",
+    "initial_count": 0,
+    "output_host": "",
+    "output_port": 0,
+    "no_car_grace_ms": 1500
+  },
+  {
+    "name": "test03-novum_2_counter",
+    "source_service": "test03-novum_2",
+    "auto_start": false,
+    "tcp_push_enabled": false,
+    "tcp_push_host": "0.0.0.0",
+    "tcp_push_port": 0,
+    "tcp_push_certfile": "",
+    "tcp_push_keyfile": "",
+    "tcp_push_ca_certs": "",
+    "initial_count": 0,
+    "output_host": "",
+    "output_port": 0,
+    "no_car_grace_ms": 1500
   }
 ]

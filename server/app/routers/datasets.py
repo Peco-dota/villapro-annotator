@@ -25,6 +25,9 @@ _jobs: dict[str, dict] = {}  # job_id -> {status, result, error, epoch, total_ep
 # Training log queues: job_id -> queue of log lines (None = sentinel/done)
 _train_logs: dict[str, queue.Queue] = {}
 
+# Training log history: job_id -> list of all lines ever logged (for reconnect replay)
+_train_log_history: dict[str, list] = {}
+
 # Cancel flags: job_id -> threading.Event (set = cancel requested)
 _train_cancel: dict[str, threading.Event] = {}
 
@@ -33,6 +36,9 @@ _train_threads: dict[str, threading.Thread] = {}
 
 # Active training job (persisted so clients can reconnect after refresh)
 _active_train_job: dict = {}  # {job_id, run_name, epochs, started_at} or {}
+
+# Live trainer reference — lets cancel endpoint set trainer.stop directly
+_trainer_ref: dict = {}  # job_id -> ultralytics Trainer instance
 
 # Active augmentation / merge jobs (persisted so clients can reconnect after navigation)
 _active_aug_job: dict = {}
@@ -105,12 +111,25 @@ def get_active_merge(_user: dict = Depends(require_user)):
     return {"active": True, **_active_merge_job, **job}
 
 
+@router.delete("/merge/active")
+def dismiss_merge(_user: dict = Depends(require_user)):
+    global _active_merge_job
+    if not _active_merge_job:
+        return {"dismissed": False}
+    job_id = _active_merge_job.get("job_id")
+    if _jobs.get(job_id, {}).get("status") == "running":
+        raise HTTPException(status_code=409, detail="Cannot dismiss a running job.")
+    _active_merge_job.clear()
+    return {"dismissed": True}
+
+
 # ── Auto-Annotate ─────────────────────────────────────────────────────────────
 
 class AutoAnnotateRequest(BaseModel):
     project_path: str
     model_path: str
     confidence: float = 0.25
+    iou: float = 0.45
     skip_annotated: bool = True
 
 
@@ -130,7 +149,8 @@ def start_auto_annotate(req: AutoAnnotateRequest, background_tasks: BackgroundTa
             from PIL import Image
             from ultralytics import YOLO
             from app.project import Project
-            from app.annotation import BoundingBox, ImageAnnotation
+            from app.annotation import BoundingBox
+            from app.project import ImageAnnotation
 
             p = Project.load(req.project_path)
             images = p.images
@@ -176,9 +196,9 @@ def start_auto_annotate(req: AutoAnnotateRequest, background_tasks: BackgroundTa
                 try:
                     import torch as _torch
                     with _torch.no_grad():
-                        results = model(img_np, conf=req.confidence, verbose=False)
+                        results = model(img_np, conf=req.confidence, iou=req.iou, verbose=False)
                 except Exception:
-                    results = model(img_np, conf=req.confidence, verbose=False)
+                    results = model(img_np, conf=req.confidence, iou=req.iou, verbose=False)
 
                 boxes = []
                 for result in results:
@@ -229,6 +249,7 @@ class ExportYoloRequest(BaseModel):
     output_dir: str
     split: Optional[dict] = None   # e.g. {"train": 0.8, "val": 0.1, "test": 0.1}
     generate_yaml: bool = True
+    augmentation: Optional[dict] = None  # AugConfig kwargs; if provided, augment inline
 
 
 @router.post("/export/yolo")
@@ -237,9 +258,13 @@ def export_yolo_endpoint(req: ExportYoloRequest, background_tasks: BackgroundTas
     p = _get_project(req.project_path)
     job_id = _new_job()
 
+    aug_cfg = None
+    if req.augmentation:
+        aug_cfg = AugConfig(**req.augmentation)
+
     def _run():
         try:
-            stats = export_yolo(p, req.output_dir, req.split, req.generate_yaml)
+            stats = export_yolo(p, req.output_dir, req.split, req.generate_yaml, aug_cfg)
             _job_done(job_id, stats)
         except Exception as e:
             _job_failed(job_id, str(e))
@@ -537,6 +562,11 @@ def cancel_train(force: bool = False, _user: dict = Depends(require_user)):
     if cancel_event:
         cancel_event.set()
 
+    # Set trainer.stop directly — works even when KI injection is swallowed by C extensions
+    trainer = _trainer_ref.get(job_id)
+    if trainer is not None:
+        trainer.stop = True
+
     if force:
         thread = _train_threads.get(job_id)
         if thread and thread.is_alive():
@@ -576,8 +606,11 @@ def train_endpoint(req: TrainRequest, background_tasks: BackgroundTasks,
         "started_at": datetime.datetime.now().isoformat(),
     })
 
+    _train_log_history[job_id] = []
+
     def _log(msg: str):
         log_q.put(msg)
+        _train_log_history[job_id].append(msg)
 
     def _run():
         try:
@@ -595,9 +628,37 @@ def train_endpoint(req: TrainRequest, background_tasks: BackgroundTasks,
             model = YOLO(req.model)
             total_epochs = req.epochs
 
+            def on_train_start(trainer):
+                _trainer_ref[job_id] = trainer
+
+            def on_epoch_start(trainer):
+                _jobs[job_id]["epoch_start_at"] = datetime.datetime.now().isoformat()
+
+            def on_batch_end(trainer):
+                try:
+                    _jobs[job_id]["batch"] = trainer.batch_i + 1
+                    _jobs[job_id]["total_batches"] = len(trainer.train_loader)
+                except Exception:
+                    pass
+                if cancel_event.is_set():
+                    trainer.stop = True
+
             def on_epoch_end(trainer):
                 ep = trainer.epoch + 1
+                now_dt = datetime.datetime.now()
+                now_iso = now_dt.isoformat()
                 _jobs[job_id]["epoch"] = ep
+                _jobs[job_id]["batch"] = 0
+                # Compute how long this epoch actually took
+                epoch_start = _jobs[job_id].get("epoch_start_at")
+                if epoch_start:
+                    duration = (now_dt - datetime.datetime.fromisoformat(epoch_start)).total_seconds()
+                    _jobs[job_id]["last_epoch_duration_s"] = round(duration)
+                # Record wall-clock time of first and latest epoch completion for
+                # accurate time-remaining estimates (excludes dataset load overhead).
+                if ep == 1:
+                    _jobs[job_id]["first_epoch_at"] = now_iso
+                _jobs[job_id]["last_epoch_at"] = now_iso
                 m = trainer.metrics or {}
                 try:
                     bl = trainer.loss_items[0].item()
@@ -625,6 +686,9 @@ def train_endpoint(req: TrainRequest, background_tasks: BackgroundTasks,
                 if cancel_event.is_set():
                     trainer.stop = True
 
+            model.add_callback("on_pretrain_routine_start", on_train_start)
+            model.add_callback("on_train_epoch_start", on_epoch_start)
+            model.add_callback("on_train_batch_end", on_batch_end)
             model.add_callback("on_train_epoch_end", on_epoch_end)
 
             results = model.train(
@@ -655,7 +719,6 @@ def train_endpoint(req: TrainRequest, background_tasks: BackgroundTasks,
                     "best_model": "", "device": device,
                     "metrics": _jobs[job_id].get("last_metrics"),
                 })
-                _active_train_job.clear()
                 return
 
             best = output_dir / "weights" / "best.pt"
@@ -683,7 +746,6 @@ def train_endpoint(req: TrainRequest, background_tasks: BackgroundTasks,
                 "best_model": best_str, "device": device,
                 "metrics": _jobs[job_id].get("last_metrics"),
             })
-            _active_train_job.clear()
         except KeyboardInterrupt:
             _log("─" * 52)
             _log("Training force-stopped.")
@@ -697,7 +759,6 @@ def train_endpoint(req: TrainRequest, background_tasks: BackgroundTasks,
                 "output_dir": str(output_dir), "best_model": "", "device": "",
                 "metrics": _jobs[job_id].get("last_metrics"),
             })
-            _active_train_job.clear()
         except Exception as e:
             import traceback
             _log(f"ERROR: {e}")
@@ -712,8 +773,20 @@ def train_endpoint(req: TrainRequest, background_tasks: BackgroundTasks,
                 "output_dir": str(output_dir), "best_model": "", "device": "",
                 "metrics": _jobs[job_id].get("last_metrics"),
             })
-            _active_train_job.clear()
         finally:
+            # Always free GPU memory immediately — don't rely on GC timing
+            try:
+                del model
+            except Exception:
+                pass
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            _trainer_ref.pop(job_id, None)
             log_q.put(None)  # sentinel
 
     t = threading.Thread(target=_run, daemon=True)
@@ -724,25 +797,31 @@ def train_endpoint(req: TrainRequest, background_tasks: BackgroundTasks,
 
 @router.get("/train/log/{job_id}")
 def train_log_stream(job_id: str, request: Request, _user: dict = Depends(require_user)):
-    """SSE stream of training log lines for a given job."""
-    log_q = _train_logs.get(job_id)
-    if log_q is None:
+    """SSE stream of training log lines for a given job.
+
+    Replays full history on every connect so navigating away and back
+    restores the complete log without any gaps.
+    """
+    if job_id not in _train_log_history and job_id not in _train_logs:
         raise HTTPException(status_code=404, detail="No log stream for this job.")
 
     async def _generate():
         import asyncio
-        loop = asyncio.get_event_loop()
+        offset = 0
         while True:
             if await request.is_disconnected():
-                break
-            try:
-                line = await loop.run_in_executor(None, lambda: log_q.get(timeout=1))
-                if line is None:
-                    yield "event: done\ndata: \n\n"
-                    break
-                yield f"data: {line}\n\n"
-            except queue.Empty:
-                yield ": keep-alive\n\n"
+                return
+            history = _train_log_history.get(job_id, [])
+            # Send any lines added since last iteration (or full history on first pass)
+            while offset < len(history):
+                yield f"data: {history[offset]}\n\n"
+                offset += 1
+            # Job finished and we've sent everything — signal done
+            status = _jobs.get(job_id, {}).get("status", "running")
+            if status in ("done", "failed") and offset >= len(_train_log_history.get(job_id, [])):
+                yield "event: done\ndata: \n\n"
+                return
+            await asyncio.sleep(0.3)
 
     return StreamingResponse(_generate(), media_type="text/event-stream")
 

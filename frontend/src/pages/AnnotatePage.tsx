@@ -23,7 +23,6 @@ export function AnnotatePage() {
   const qc = useQueryClient()
 
   const [currentFile, setCurrentFile] = useState<string | null>(null)
-  const [tool, setTool] = useState<'draw' | 'select'>('draw')
   const [selectedClass, setSelectedClass] = useState(0)
   const [selectedBoxId, setSelectedBoxId] = useState<string | null>(null)
   const [boxes, setBoxesState] = useState<BoundingBox[]>([])
@@ -79,9 +78,7 @@ export function AnnotatePage() {
       pushUndo(boxes)
       setBoxesState(data.boxes)
       replaceMut.mutate(data.boxes)
-      // Switch to select mode and select the last box so it's immediately editable
       if (data.boxes.length > 0) {
-        setTool('select')
         setSelectedBoxId(data.boxes[data.boxes.length - 1].id)
       }
     },
@@ -172,8 +169,6 @@ export function AnnotatePage() {
         if (e.key === 's') { e.preventDefault(); saveMut.mutate() }
         return
       }
-      if (e.key === 'v' || e.key === 'V') setTool('select')
-      if (e.key === 'r' || e.key === 'R') setTool('draw')
       if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') gotoImage('prev')
       if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') gotoImage('next')
       if (e.key === ' ') { e.preventDefault(); gotoImage('next') }
@@ -199,8 +194,6 @@ export function AnnotatePage() {
   return (
     <div className="flex flex-col h-screen bg-[#0f172a] overflow-hidden">
       <Toolbar
-        tool={tool}
-        onToolChange={setTool}
         canUndo={undoStack.length > 0}
         canRedo={redoStack.length > 0}
         onUndo={undo}
@@ -257,7 +250,6 @@ export function AnnotatePage() {
               boxes={boxes}
               classes={classes}
               selectedClass={selectedClass}
-              tool={tool}
               selectedBoxId={selectedBoxId}
               onSelectBox={setSelectedBoxId}
               onBoxesChange={setBoxes}
@@ -289,6 +281,8 @@ export function AnnotatePage() {
       {/* Status bar */}
       <div className="flex items-center gap-4 px-4 h-7 bg-[#0f172a] border-t border-[#1e293b] shrink-0 text-[11px] text-[#64748b]">
         <span>Image: {currentFile ?? '—'}</span>
+        <span className="text-[#334155]">|</span>
+        <span>{currentIndex >= 0 ? currentIndex + 1 : '—'} / {images.length}</span>
         <span className="text-[#334155]">|</span>
         <span>Boxes: {boxes.length}</span>
         <span className="text-[#334155]">|</span>

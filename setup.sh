@@ -47,7 +47,14 @@ else
     info "Docker Compose installed."
 fi
 
-# ── 4. GPU detection ──────────────────────────────────────────────────────────
+# ── 4. WSL2 detection ────────────────────────────────────────────────────────
+IS_WSL=false
+if grep -qi microsoft /proc/version 2>/dev/null; then
+    IS_WSL=true
+    info "WSL2 environment detected — data directory will use native Linux filesystem for best training performance."
+fi
+
+# ── 5. GPU detection ──────────────────────────────────────────────────────────
 step "Detecting GPU..."
 GPU_ENABLED=false
 
@@ -76,7 +83,7 @@ else
     warn "Inference will be slower (2–8 FPS typical). Suitable for low-speed camera streams."
 fi
 
-# ── 5. .env file ──────────────────────────────────────────────────────────────
+# ── 6. .env file ──────────────────────────────────────────────────────────────
 step "Checking .env configuration..."
 if [[ -f .env ]]; then
     info ".env already exists — skipping generation."
@@ -93,10 +100,18 @@ else
 
     cp .env.example .env
     sed -i "s|^VISIONQ_SECRET=.*|VISIONQ_SECRET=${SECRET}|" .env
+
+    # On WSL2 set data dir to native Linux filesystem — avoids the slow /mnt/c/ I/O
+    # path that would otherwise make DataLoader workers a training bottleneck.
+    if [[ "$IS_WSL" == "true" ]]; then
+        sed -i "s|^VISIONQ_DATA_DIR=.*|VISIONQ_DATA_DIR=${HOME}/villapro-data|" .env
+        info "Data directory set to ${HOME}/villapro-data (native ext4, optimal for training)."
+    fi
+
     info ".env created with a generated secret."
 fi
 
-# ── 6. Write GPU/CPU mode into .env ───────────────────────────────────────────
+# ── 7. Write GPU/CPU mode into .env ───────────────────────────────────────────
 # Remove any previous COMPOSE_FILE line and rewrite it based on detected hardware
 sed -i '/^COMPOSE_FILE=/d' .env
 if [[ "$GPU_ENABLED" == "true" ]]; then
@@ -114,7 +129,7 @@ if [[ -z "${VISIONQ_SECRET:-}" ]]; then
     error "VISIONQ_SECRET is empty in .env. Please set it to a strong random value (openssl rand -hex 32)."
 fi
 
-# ── 7. Create data directory ───────────────────────────────────────────────────
+# ── 8. Create data directory ───────────────────────────────────────────────────
 DATA_DIR="${VISIONQ_DATA_DIR:-./villapro-data}"
 if [[ ! -d "$DATA_DIR" ]]; then
     mkdir -p "$DATA_DIR"
@@ -123,7 +138,7 @@ else
     info "Data directory already exists: $DATA_DIR"
 fi
 
-# ── 8. Build and start ────────────────────────────────────────────────────────
+# ── 9. Build and start ────────────────────────────────────────────────────────
 step "Building VisionQ image..."
 docker compose build
 

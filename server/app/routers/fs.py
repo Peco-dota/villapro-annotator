@@ -1,7 +1,9 @@
 """Filesystem browse and upload endpoints."""
 from typing import Dict, Optional, Set
 import os
+import shutil
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.auth import require_user
@@ -21,15 +23,15 @@ YAML_EXTS  = {".yaml", ".yml"}
 JSON_EXTS  = {".json", ".annotatex"}
 ALL_EXTS   = IMAGE_EXTS | VIDEO_EXTS | MODEL_EXTS | YAML_EXTS | JSON_EXTS
 
-# filter name → set of extensions shown (None = directories only)
+# filter name → set of extensions shown (None = no files, just dirs)
 _FILTERS: Dict[str, Optional[Set[str]]] = {
-    "any":        None,          # dirs + all known file types
+    "any":        ALL_EXTS,      # dirs + all known file types
     "project":    JSON_EXTS,     # .annotatex / .json
-    "images_dir": None,          # directory picker
+    "images_dir": IMAGE_EXTS,    # image files only
     "model":      MODEL_EXTS,    # .pt .pth .onnx
     "video":      VIDEO_EXTS,    # video files
     "yaml":       YAML_EXTS,     # data.yaml
-    "dir":        None,          # directory only
+    "dir":        ALL_EXTS,      # directory picker — files shown as non-clickable preview
 }
 
 
@@ -75,7 +77,8 @@ def browse(
         if not os.path.isdir(cwd):
             raise HTTPException(status_code=404, detail="Directory not found.")
 
-    allowed_exts = _FILTERS.get(filter)  # None = dirs-only (no files listed)
+    show_all = (filter == "*")
+    allowed_exts = None if show_all else _FILTERS.get(filter)  # None = dirs-only (no files listed)
 
     try:
         entries = os.scandir(cwd)
@@ -90,9 +93,9 @@ def browse(
             continue
         if entry.is_dir(follow_symlinks=False):
             dirs.append(entry.name)
-        elif allowed_exts is not None:
+        elif show_all or allowed_exts is not None:
             ext = os.path.splitext(entry.name)[1].lower()
-            if ext in allowed_exts:
+            if show_all or ext in allowed_exts:
                 try:
                     st = entry.stat()
                     size = st.st_size
@@ -190,3 +193,67 @@ async def upload_file(
         raise HTTPException(status_code=500, detail=f"Upload failed: {exc}")
 
     return {"path": final_path}
+
+
+class MoveRequest(BaseModel):
+    src: str
+    dest: str
+
+
+@router.post("/move")
+def move_path(req: MoveRequest, _user: dict = Depends(require_user)):
+    """Move or rename a file or directory. `dest` may be a directory (item is moved inside) or a full target path."""
+    src = os.path.realpath(os.path.abspath(req.src))
+    if not os.path.exists(src):
+        raise HTTPException(status_code=404, detail="Source path not found.")
+    dest = os.path.abspath(req.dest)
+    if os.path.isdir(dest):
+        dest = os.path.join(dest, os.path.basename(src))
+    dest = os.path.realpath(dest)
+    if dest == src:
+        return {"src": src, "dest": dest}
+    if os.path.exists(dest):
+        raise HTTPException(status_code=409, detail="A file or folder already exists at the destination.")
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.move(src, dest)
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Permission denied.")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"src": src, "dest": dest}
+
+
+class DeleteRequest(BaseModel):
+    path: str
+    recursive: bool = False
+
+
+@router.delete("/delete")
+def delete_path(req: DeleteRequest, _user: dict = Depends(require_user)):
+    """Delete a file or directory. Pass recursive=true to delete non-empty directories."""
+    real_path = os.path.realpath(os.path.abspath(req.path))
+    if not os.path.exists(real_path):
+        raise HTTPException(status_code=404, detail="Path not found.")
+    try:
+        if os.path.isfile(real_path) or os.path.islink(real_path):
+            os.unlink(real_path)
+        elif os.path.isdir(real_path):
+            if req.recursive:
+                shutil.rmtree(real_path)
+            else:
+                os.rmdir(real_path)  # raises OSError if not empty
+        else:
+            raise HTTPException(status_code=400, detail="Path is not a file or directory.")
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"deleted": real_path}
+
+
+@router.get("/download")
+def download_file(path: str, _user: dict = Depends(require_user)):
+    """Serve a file as a download."""
+    real_path = os.path.realpath(os.path.abspath(path))
+    if not os.path.isfile(real_path):
+        raise HTTPException(status_code=404, detail="File not found.")
+    return FileResponse(real_path, filename=os.path.basename(real_path))

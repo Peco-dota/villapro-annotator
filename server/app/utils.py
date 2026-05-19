@@ -45,7 +45,7 @@ def hex_to_rgba(hex_color: str, alpha: int = 255) -> tuple[int, int, int, int]:
 # ── YOLO Export ──────────────────────────────────────────────────────────────
 
 def export_yolo(project, output_dir: str, split: Optional[dict] = None,
-                generate_yaml: bool = True) -> dict:
+                generate_yaml: bool = True, aug_cfg=None) -> dict:
     output_dir = Path(output_dir)
 
     if split:
@@ -71,7 +71,8 @@ def export_yolo(project, output_dir: str, split: Optional[dict] = None,
             partitions[sp] = all_images[idx:idx + count]
             idx += count
 
-    stats = {"images": 0, "annotations": 0, "classes": len(project.classes)}
+    stats = {"images": 0, "augmented": 0, "annotations": 0, "classes": len(project.classes)}
+    rng = random.Random(42)
 
     for sp, files in partitions.items():
         if split:
@@ -84,20 +85,62 @@ def export_yolo(project, output_dir: str, split: Optional[dict] = None,
         lbl_out.mkdir(parents=True, exist_ok=True)
 
         for fn in files:
-            src = os.path.join(project.image_folder, fn)
-            if os.path.exists(src):
-                shutil.copy2(src, img_out / fn)
-                stats["images"] += 1
-
+            src = project.image_path(fn)
+            out_name = Path(fn).name
+            stem = Path(fn).stem
+            suffix = Path(fn).suffix.lower() or ".jpg"
             ia = project.annotations.get(fn)
-            label_path = lbl_out / (Path(fn).stem + ".txt")
-            if ia and ia.boxes:
-                with open(label_path, "w") as f:
-                    for box in ia.boxes:
-                        f.write(box.to_yolo_line() + "\n")
-                stats["annotations"] += len(ia.boxes)
+            boxes = ia.boxes if ia else []
+
+            if aug_cfg is not None:
+                if not os.path.exists(src):
+                    continue
+                try:
+                    from PIL import Image as PILImage
+                    pil_img = PILImage.open(src).convert("RGB")
+                except Exception:
+                    continue
+
+                if aug_cfg.output_original:
+                    pil_img.save(img_out / out_name)
+                    lbl_path = lbl_out / (stem + ".txt")
+                    if boxes:
+                        with open(lbl_path, "w") as f:
+                            for box in boxes:
+                                f.write(box.to_yolo_line() + "\n")
+                        stats["annotations"] += len(boxes)
+                    else:
+                        lbl_path.touch()
+                    stats["images"] += 1
+
+                if not aug_cfg.only_annotated or boxes:
+                    from app.augmentation import _apply_single
+                    variants = _apply_single(pil_img, boxes, aug_cfg, rng)
+                    for j, (aug_img, aug_boxes) in enumerate(variants):
+                        aug_stem = f"{stem}_aug{j + 1}"
+                        aug_img.save(img_out / (aug_stem + suffix), quality=95)
+                        aug_lbl = lbl_out / (aug_stem + ".txt")
+                        if aug_boxes:
+                            with open(aug_lbl, "w") as f:
+                                for box in aug_boxes:
+                                    f.write(box.to_yolo_line() + "\n")
+                            stats["annotations"] += len(aug_boxes)
+                        else:
+                            aug_lbl.touch()
+                        stats["augmented"] += 1
             else:
-                label_path.touch()
+                if os.path.exists(src):
+                    shutil.copy2(src, img_out / out_name)
+                    stats["images"] += 1
+
+                label_path = lbl_out / (stem + ".txt")
+                if ia and ia.boxes:
+                    with open(label_path, "w") as f:
+                        for box in ia.boxes:
+                            f.write(box.to_yolo_line() + "\n")
+                    stats["annotations"] += len(ia.boxes)
+                else:
+                    label_path.touch()
 
     classes_txt = output_dir / "classes.txt"
     with open(classes_txt, "w") as f:
@@ -139,7 +182,7 @@ def export_coco(project, output_dir: str) -> dict:
 
     ann_id = 1
     for img_id, fn in enumerate(project.images, 1):
-        src = os.path.join(project.image_folder, fn)
+        src = project.image_path(fn)
         if not os.path.exists(src):
             continue
 
@@ -149,8 +192,9 @@ def export_coco(project, output_dir: str) -> dict:
         except Exception:
             continue
 
-        shutil.copy2(src, img_out / fn)
-        coco["images"].append({"id": img_id, "file_name": fn, "width": w, "height": h})
+        out_name = Path(fn).name
+        shutil.copy2(src, img_out / out_name)
+        coco["images"].append({"id": img_id, "file_name": out_name, "width": w, "height": h})
 
         ia = project.annotations.get(fn)
         if ia:

@@ -1,9 +1,12 @@
 """Detection services API — manage YOLO inference services, SSE stream, TCP push."""
 import asyncio
 import json
+import logging
 import os
 import threading
 from typing import Optional, AsyncGenerator
+
+log = logging.getLogger("detection")
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse, Response
@@ -131,6 +134,9 @@ class ServiceConfigIn(BaseModel):
     tcp_push_keyfile: str = ""
     tcp_push_ca_certs: str = ""
     kind: str = "detection"
+    enhance_gamma: float = 1.0
+    enhance_clahe: bool = False
+    enhance_clahe_clip: float = 2.0
 
 
 def _cfg_to_dict(cfg: ServiceConfig, registry) -> dict:
@@ -194,6 +200,9 @@ def create_or_update_service(req: ServiceConfigIn, _user: dict = Depends(require
         tcp_push_keyfile=req.tcp_push_keyfile,
         tcp_push_ca_certs=req.tcp_push_ca_certs,
         kind=req.kind,
+        enhance_gamma=req.enhance_gamma,
+        enhance_clahe=req.enhance_clahe,
+        enhance_clahe_clip=req.enhance_clahe_clip,
     )
     get_registry().upsert_config(cfg)
     return _cfg_to_dict(cfg, get_registry())
@@ -290,6 +299,18 @@ def get_service_status(name: str, _user: dict = Depends(require_user)):
     }
 
 
+@router.get("/services/{name}/result")
+def get_service_result(name: str, _user: dict = Depends(require_user)):
+    """Return the last detection result for this service (same payload as SSE/TCP push)."""
+    reg = get_registry()
+    if reg.get_config(name) is None:
+        raise HTTPException(status_code=404, detail=f"Service '{name}' not found.")
+    svc = reg.get_service(name)
+    if svc is None or not svc._last_payload:
+        return {"service_name": name, "available": False}
+    return svc._last_payload
+
+
 @router.get("/services/{name}/log")
 def get_service_log(name: str, _user: dict = Depends(require_user)):
     reg = get_registry()
@@ -329,14 +350,23 @@ def start_debug(name: str, path: Optional[str] = None,
                 _user: dict = Depends(require_user)):
     svc = get_registry().get_service(name)
     if svc is None:
-        raise HTTPException(status_code=404, detail="Service not running.")
+        raise HTTPException(status_code=404, detail=f"Service '{name}' not found in registry. Make sure it is running.")
     if not path:
-        import os as _os
         from datetime import datetime
-        debug_dir = _os.path.join(_os.environ.get("VISIONQ_DATA", "/data"), "debug", name)
-        _os.makedirs(debug_dir, exist_ok=True)
-        path = _os.path.join(debug_dir, f"debug_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
-    svc.start_direction_debug(path)
+        data_root = os.environ.get("VISIONQ_DATA", "/data")
+        debug_dir = os.path.join(data_root, "debug", name)
+        try:
+            os.makedirs(debug_dir, exist_ok=True)
+        except OSError as e:
+            log.error("debug start: cannot create dir %s: %s", debug_dir, e)
+            raise HTTPException(status_code=500, detail=f"Cannot create debug directory {debug_dir}: {e}")
+        path = os.path.join(debug_dir, f"debug_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+    try:
+        svc.start_direction_debug(path)
+    except OSError as e:
+        log.error("debug start: cannot open file %s: %s", path, e)
+        raise HTTPException(status_code=500, detail=f"Cannot create debug file {path}: {e}")
+    log.info("Debug started for service '%s' → %s", name, path)
     return {"debug_path": path}
 
 
@@ -344,8 +374,14 @@ def start_debug(name: str, path: Optional[str] = None,
 def stop_debug(name: str, _user: dict = Depends(require_user)):
     svc = get_registry().get_service(name)
     if svc is None:
-        raise HTTPException(status_code=404, detail="Service not running.")
+        raise HTTPException(status_code=404, detail=f"Service '{name}' not found in registry.")
     path = svc.stop_direction_debug()
+    if not path:
+        raise HTTPException(status_code=400, detail="Debug was not active for this service.")
+    if not os.path.isfile(path):
+        log.warning("Debug stopped for '%s' but file not found: %s", name, path)
+        raise HTTPException(status_code=500, detail=f"Debug file was not written: {path}")
+    log.info("Debug stopped for service '%s' → %s", name, path)
     return {"debug_path": path}
 
 
@@ -393,13 +429,22 @@ def step_frame(name: str, _user: dict = Depends(require_user)):
     return {"ok": True}
 
 
+@router.post("/services/{name}/video/reverse")
+def toggle_reverse(name: str, _user: dict = Depends(require_user)):
+    svc = get_registry().get_service(name)
+    if svc is None:
+        raise HTTPException(status_code=404, detail="Service not running.")
+    reverse = svc.toggle_video_reverse()
+    return {"reverse": reverse}
+
+
 @router.get("/services/{name}/video/state")
 def get_video_state(name: str, _user: dict = Depends(require_user)):
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
-    pos_ms, duration_ms, speed, paused = svc.get_video_state()
-    return {"pos_ms": pos_ms, "duration_ms": duration_ms, "speed": speed, "paused": paused}
+    pos_ms, duration_ms, speed, paused, reverse = svc.get_video_state()
+    return {"pos_ms": pos_ms, "duration_ms": duration_ms, "speed": speed, "paused": paused, "reverse": reverse}
 
 
 # ── Preview frame (JPEG snapshot) ────────────────────────────────────────────
@@ -547,12 +592,7 @@ def start_tcp_push(name: str, req: TcpPushStartRequest,
 
 @router.post("/services/{name}/tcp/stop")
 def stop_tcp_push(name: str, _user: dict = Depends(require_user)):
-    reg = get_registry()
-    cfg = reg.get_config(name)
     get_tcp_registry().stop(name)
-    if cfg is not None:
-        from dataclasses import replace
-        reg.upsert_config(replace(cfg, tcp_push_enabled=False))
     return {"tcp_push": False}
 
 
@@ -573,12 +613,14 @@ async def sse_stream(name: str, request: Request,
     """
     from app.auth import _SECRET, _ALGORITHM
     from jose import JWTError, jwt as _jwt
+    from app.config import get_config
     if not token:
         raise HTTPException(status_code=401, detail="Missing token.")
     try:
         _jwt.decode(token, _SECRET, algorithms=[_ALGORITHM])
     except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token.")
+        if not get_config().validate_token(token):
+            raise HTTPException(status_code=401, detail="Invalid token.")
 
     reg = get_registry()
     if reg.get_config(name) is None:
@@ -640,6 +682,13 @@ def clear_all_results(_user: dict = Depends(require_user)):
     """Clear the in-memory result buffer for all services."""
     _result_buffer.clear()
     return {"cleared": True}
+
+
+@router.delete("/results/{name}")
+def clear_service_results(name: str, _user: dict = Depends(require_user)):
+    """Clear the in-memory result buffer for a single service."""
+    _result_buffer.pop(name, None)
+    return {"cleared": name}
 
 
 # Simple in-memory result buffer (last 100 per service)

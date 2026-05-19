@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   startService, stopService, restartService, deleteService,
@@ -9,10 +9,10 @@ import {
   startPreview, stopPreview,
   startTcpPush, stopTcpPush,
   getMjpegStreamUrl, getVideoState,
-  videoPause, videoSpeed, videoSeek, videoSeekTo, videoStep,
+  videoPause, videoSpeed, videoSeek, videoSeekTo, videoStep, videoReverse,
   sseUrl, api,
   startCounter, stopCounter, getCounterStatus, resetCounter,
-  counterSseUrl,
+  counterSseUrl, clearServiceResults,
 } from '../../lib/api'
 import type { ServiceConfig, ServiceStatus, CountingStatus, CountingResult } from '../../lib/types'
 import { Spinner } from '../ui/Spinner'
@@ -122,10 +122,17 @@ interface ServiceResults {
   totalReports: number
   carCount: number
   rearCount: number
+  reset: () => void
 }
 
+const EMPTY_RESULTS: Omit<ServiceResults, 'reset'> = { results: [], lastSeen: 0, totalReports: 0, carCount: 0, rearCount: 0 }
+
 function useServiceResults(name: string, enabled: boolean, runKey: string): ServiceResults {
-  const [data, setData] = useState<ServiceResults>({ results: [], lastSeen: 0, totalReports: 0, carCount: 0, rearCount: 0 })
+  const [data, setData] = useState(EMPTY_RESULTS)
+  const reset = useCallback(() => {
+    setData(EMPTY_RESULTS)
+    clearServiceResults(name).catch(() => {})
+  }, [name])
   const esRef = useRef<EventSource | null>(null)
 
   useEffect(() => {
@@ -191,7 +198,7 @@ function useServiceResults(name: string, enabled: boolean, runKey: string): Serv
     return () => { es.close(); esRef.current = null; clearInterval(pollId) }
   }, [name, enabled, runKey])
 
-  return data
+  return { ...data, reset }
 }
 
 // ── Counting events hook ──────────────────────────────────────────────────────
@@ -234,6 +241,10 @@ function useCounterEvents(counterName: string, enabled: boolean): CounterState {
     es.onmessage = (e) => {
       try {
         const evt = JSON.parse(e.data) as CountingResult
+        if (evt.event === 'reset') {
+          setData({ events: [], currentCount: evt.count, totalIn: 0, totalOut: 0, lastSeen: Date.now() })
+          return
+        }
         if (evt.event !== 'car_passed') return
         setData(prev => ({
           events: [evt, ...prev.events].slice(0, 100),
@@ -371,7 +382,7 @@ function CombinedPanel({ serviceName, detectionData, isDetLive }: {
       </div>
 
       {/* Detection mini-stats */}
-      <div className="flex gap-4 px-3 py-2 border-b border-[#1e293b] bg-[#0f172a]/40 shrink-0">
+      <div className="flex items-center gap-4 px-3 py-2 border-b border-[#1e293b] bg-[#0f172a]/40 shrink-0">
         {[
           { label: 'Reports', value: detectionData.totalReports },
           { label: 'Car', value: detectionData.carCount },
@@ -382,6 +393,7 @@ function CombinedPanel({ serviceName, detectionData, isDetLive }: {
             <span className="text-[10px] text-slate-600">{label}</span>
           </div>
         ))}
+        <button onClick={detectionData.reset} className="ml-auto text-[10px] text-slate-600 hover:text-slate-300 cursor-pointer transition-colors" title="Reset logs">↺ Reset</button>
         {lastDir && (
           <div className="flex flex-col">
             <span className={`text-base font-bold leading-tight ${DIR_COLOR[lastDir] ?? 'text-slate-400'}`}>{lastDir}</span>
@@ -460,11 +472,12 @@ function InlinePreview({ service, onStop, runKey, counterExists }: { service: Se
     refetchInterval: isVideo ? 500 : false,
   })
 
-  const pauseMut  = useMutation({ mutationFn: () => videoPause(service.name), onSuccess: () => refetchVideo() })
-  const speedMut  = useMutation({ mutationFn: (s: number) => videoSpeed(service.name, s), onSuccess: () => refetchVideo() })
-  const seekMut   = useMutation({ mutationFn: (d: number) => videoSeek(service.name, d),  onSuccess: () => refetchVideo() })
-  const seekToMut = useMutation({ mutationFn: (ms: number) => videoSeekTo(service.name, ms), onSuccess: () => refetchVideo() })
-  const stepMut   = useMutation({ mutationFn: () => videoStep(service.name) })
+  const pauseMut   = useMutation({ mutationFn: () => videoPause(service.name), onSuccess: () => refetchVideo() })
+  const speedMut   = useMutation({ mutationFn: (s: number) => videoSpeed(service.name, s), onSuccess: () => refetchVideo() })
+  const seekMut    = useMutation({ mutationFn: (d: number) => videoSeek(service.name, d),  onSuccess: () => refetchVideo() })
+  const seekToMut  = useMutation({ mutationFn: (ms: number) => videoSeekTo(service.name, ms), onSuccess: () => refetchVideo() })
+  const stepMut    = useMutation({ mutationFn: () => videoStep(service.name) })
+  const reverseMut = useMutation({ mutationFn: () => videoReverse(service.name), onSuccess: () => refetchVideo() })
 
   const [hoverPct, setHoverPct] = useState<number | null>(null)
   const getPct = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -481,6 +494,7 @@ function InlinePreview({ service, onStop, runKey, counterExists }: { service: Se
   const dur = videoState?.duration_ms ?? 0
   const paused = videoState?.paused ?? false
   const currentSpeed = videoState?.speed ?? 1
+  const reverse = videoState?.reverse ?? false
 
   const receiverData = useServiceResults(service.name, !isCounter, runKey)
   const [, forceUpdate] = useState(0)
@@ -573,7 +587,13 @@ function InlinePreview({ service, onStop, runKey, counterExists }: { service: Se
                 <Button size="sm" variant="ghost" onClick={() => pauseMut.mutate()} disabled={pauseMut.isPending}>
                   {paused ? '▶' : '⏸'}
                 </Button>
-                {paused && <Button size="sm" variant="ghost" onClick={() => stepMut.mutate()}>⏭</Button>}
+                <Button
+                  size="sm" variant="ghost"
+                  onClick={() => reverseMut.mutate()}
+                  title="Play in reverse"
+                  className={reverse ? '!bg-violet-600 !text-white' : ''}
+                >⏪</Button>
+                {paused && <Button size="sm" variant="ghost" onClick={() => stepMut.mutate()} title={reverse ? 'Step one frame back' : 'Step one frame'}>⏭</Button>}
                 <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(5000)}>+5s</Button>
                 <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(15000)}>+15s</Button>
                 <div className="flex items-center gap-1 ml-1">
@@ -605,7 +625,7 @@ function InlinePreview({ service, onStop, runKey, counterExists }: { service: Se
                   <span className="text-xs text-slate-600">{isLive ? new Date(receiverData.lastSeen).toLocaleTimeString() : 'waiting…'}</span>
                 </div>
 
-                <div className="flex gap-4 px-3 py-2 border-b border-[#1e293b] bg-[#0f172a]/40">
+                <div className="flex items-center gap-4 px-3 py-2 border-b border-[#1e293b] bg-[#0f172a]/40">
                   {[
                     { label: 'Reports', value: receiverData.totalReports },
                     { label: 'Car', value: receiverData.carCount },
@@ -616,6 +636,7 @@ function InlinePreview({ service, onStop, runKey, counterExists }: { service: Se
                       <span className="text-[10px] text-slate-600">{label}</span>
                     </div>
                   ))}
+                  <button onClick={receiverData.reset} className="ml-auto text-[10px] text-slate-600 hover:text-slate-300 cursor-pointer transition-colors" title="Reset logs">↺ Reset</button>
                   {lastDir && (
                     <div className="flex flex-col">
                       <span className={`text-base font-bold leading-tight ${DIR_COLOR[lastDir] ?? 'text-slate-400'}`}>{lastDir}</span>
@@ -729,14 +750,22 @@ export function ServiceCard({ service, onEdit, onDuplicate, onPreview }: Props) 
 
   const recStartMut = useMutation({ mutationFn: () => startRecording(service.name), onSuccess: inv })
   const recStopMut  = useMutation({ mutationFn: () => stopRecording(service.name),  onSuccess: inv })
-  const [dbgNotice, setDbgNotice] = useState<{ path: string; saved: boolean } | null>(null)
+  const [dbgNotice, setDbgNotice] = useState<{ path: string; saved: boolean; error?: string } | null>(null)
   const dbgStartMut = useMutation({
     mutationFn: () => startDebug(service.name),
     onSuccess: (data: { debug_path: string }) => { inv(); setDbgNotice({ path: data.debug_path, saved: false }) },
+    onError: (e: unknown) => {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? String(e)
+      setDbgNotice({ path: '', saved: false, error: `Failed to start debug: ${msg}` })
+    },
   })
   const dbgStopMut  = useMutation({
     mutationFn: () => stopDebug(service.name),
     onSuccess: (data: { debug_path: string }) => { inv(); setDbgNotice({ path: data.debug_path, saved: true }) },
+    onError: (e: unknown) => {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? String(e)
+      setDbgNotice({ path: '', saved: false, error: `Failed to stop debug: ${msg}` })
+    },
   })
   const dsStartMut  = useMutation({ mutationFn: () => startDataset(service.name),   onSuccess: inv })
   const dsStopMut   = useMutation({ mutationFn: () => stopDataset(service.name),    onSuccess: inv })
@@ -962,12 +991,16 @@ export function ServiceCard({ service, onEdit, onDuplicate, onPreview }: Props) 
 
       {/* ── Debug notice ── */}
       {dbgNotice && (
-        <div className="mx-4 mb-2 flex items-center justify-between gap-2 px-3 py-2 bg-green-900/20 border border-green-700/40 rounded-lg text-xs text-green-300">
+        <div className={`mx-4 mb-2 flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-xs ${dbgNotice.error ? 'bg-red-900/20 border border-red-700/40 text-red-300' : 'bg-green-900/20 border border-green-700/40 text-green-300'}`}>
           <span>
-            {dbgNotice.saved ? '✓ Debug log saved to: ' : '⏺ Debug log writing to: '}
-            <span className="font-mono text-green-200">{dbgNotice.path}</span>
+            {dbgNotice.error
+              ? dbgNotice.error
+              : dbgNotice.saved
+                ? <>✓ Debug log saved to: <span className="font-mono text-green-200">{dbgNotice.path}</span></>
+                : <>⏺ Debug log writing to: <span className="font-mono text-green-200">{dbgNotice.path}</span></>
+            }
           </span>
-          <button onClick={() => setDbgNotice(null)} className="text-green-600 hover:text-green-300 shrink-0 cursor-pointer">×</button>
+          <button onClick={() => setDbgNotice(null)} className={`shrink-0 cursor-pointer ${dbgNotice.error ? 'text-red-600 hover:text-red-300' : 'text-green-600 hover:text-green-300'}`}>×</button>
         </div>
       )}
 

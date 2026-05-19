@@ -73,6 +73,10 @@ export interface ServiceConfig {
   tcp_push_keyfile: string
   tcp_push_ca_certs: string
   kind: 'detection' | 'counter'
+  // Image enhancement
+  enhance_gamma: number
+  enhance_clahe: boolean
+  enhance_clahe_clip: number
 }
 
 export interface ServiceStatus {

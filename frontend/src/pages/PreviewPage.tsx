@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import {
   getMjpegStreamUrl, getVideoState,
-  videoPause, videoSpeed, videoSeek, videoSeekTo, videoStep,
+  videoPause, videoSpeed, videoSeek, videoSeekTo, videoStep, videoReverse,
   sseUrl, api, counterSseUrl,
 } from '../lib/api'
 import type { CountingResult } from '../lib/types'
@@ -64,11 +64,12 @@ function VideoControls({ name }: { name: string }) {
     refetchInterval: 500,
   })
 
-  const pauseMut  = useMutation({ mutationFn: () => videoPause(name), onSuccess: () => refetch() })
-  const speedMut  = useMutation({ mutationFn: (s: number) => videoSpeed(name, s), onSuccess: () => refetch() })
-  const seekMut   = useMutation({ mutationFn: (d: number) => videoSeek(name, d),  onSuccess: () => refetch() })
-  const seekToMut = useMutation({ mutationFn: (ms: number) => videoSeekTo(name, ms), onSuccess: () => refetch() })
-  const stepMut   = useMutation({ mutationFn: () => videoStep(name) })
+  const pauseMut   = useMutation({ mutationFn: () => videoPause(name), onSuccess: () => refetch() })
+  const speedMut   = useMutation({ mutationFn: (s: number) => videoSpeed(name, s), onSuccess: () => refetch() })
+  const seekMut    = useMutation({ mutationFn: (d: number) => videoSeek(name, d),  onSuccess: () => refetch() })
+  const seekToMut  = useMutation({ mutationFn: (ms: number) => videoSeekTo(name, ms), onSuccess: () => refetch() })
+  const stepMut    = useMutation({ mutationFn: () => videoStep(name) })
+  const reverseMut = useMutation({ mutationFn: () => videoReverse(name), onSuccess: () => refetch() })
 
   const fmtTime = (ms: number) => {
     const s = Math.floor(ms / 1000)
@@ -79,6 +80,7 @@ function VideoControls({ name }: { name: string }) {
   const dur = videoState?.duration_ms ?? 0
   const paused = videoState?.paused ?? false
   const speed = videoState?.speed ?? 1
+  const reverse = videoState?.reverse ?? false
 
   const [hoverPct, setHoverPct] = useState<number | null>(null)
   const getPct = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -119,14 +121,20 @@ function VideoControls({ name }: { name: string }) {
           <span className="w-12 shrink-0 font-mono">{fmtTime(dur)}</span>
         </div>
       )}
-      <div className="flex items-center gap-2 flex-wrap">
+      <div className="flex items-center gap-2">
         <Button size="sm" variant="ghost" onClick={() => seekToMut.mutate(0)} title="Go to start">⏮</Button>
         <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-15000)}>-15s</Button>
         <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-5000)}>-5s</Button>
         <Button size="sm" variant="ghost" onClick={() => pauseMut.mutate()} disabled={pauseMut.isPending}>
           {paused ? '▶' : '⏸'}
         </Button>
-        {paused && <Button size="sm" variant="ghost" onClick={() => stepMut.mutate()} title="Step one frame">⏭</Button>}
+        <Button
+          size="sm" variant="ghost"
+          onClick={() => reverseMut.mutate()}
+          title="Play in reverse"
+          className={reverse ? '!bg-violet-600 !text-white' : ''}
+        >⏪</Button>
+        <Button size="sm" variant="ghost" onClick={() => stepMut.mutate()} title={reverse ? 'Step one frame back' : 'Step one frame'} className={paused ? '' : 'invisible'}>⏭</Button>
         <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(5000)}>+5s</Button>
         <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(15000)}>+15s</Button>
         <div className="flex items-center gap-1.5 ml-2">

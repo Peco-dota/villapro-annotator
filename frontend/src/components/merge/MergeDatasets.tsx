@@ -48,12 +48,17 @@ export function MergeDatasets() {
   const [projectPickerOpen, setProjectPickerOpen] = useState(false)
   const [datasetPickerOpen, setDatasetPickerOpen] = useState(false)
   const [outputDir, setOutputDir] = useState('')
+  const [datasetName, setDatasetName] = useState('')
+  const effectiveName = datasetName.trim() || 'merged_dataset'
+  const effectiveOutputDir = outputDir ? `${outputDir.replace(/\/+$/, '')}/${effectiveName}` : ''
 
   // Split
   const [doSplit, setDoSplit] = useState(true)
+  const [includeTest, setIncludeTest] = useState(true)
   const [trainPct, setTrainPct] = useState(80)
   const [valPct, setValPct] = useState(10)
-  const testPct = Math.max(0, 100 - trainPct - valPct)
+  const testPct = includeTest ? Math.max(0, 100 - trainPct - valPct) : 0
+  const effectiveValPct = includeTest ? valPct : 100 - trainPct
   const [generateYaml, setGenerateYaml] = useState(true)
 
   // Augmentation
@@ -82,13 +87,17 @@ export function MergeDatasets() {
 
   const removeSource = (path: string) => setSources(prev => prev.filter(s => s.path !== path))
 
-  const split = doSplit ? { train: trainPct / 100, val: valPct / 100, test: testPct / 100 } : undefined
+  const split = doSplit
+    ? includeTest
+      ? { train: trainPct / 100, val: valPct / 100, test: testPct / 100 }
+      : { train: trainPct / 100, val: (100 - trainPct) / 100 }
+    : undefined
   const augmentation = doAug ? augmentConfigToPayload(augConfig) : null
 
   const mergeMut = useMutation({
     mutationFn: () => exportBatch({
       sources: sources.map(s => s.path),
-      output_dir: outputDir,
+      output_dir: effectiveOutputDir,
       split,
       generate_yaml: generateYaml,
       augmentation,
@@ -181,39 +190,63 @@ export function MergeDatasets() {
 
         {doSplit && (
           <>
+            {/* Visual bar */}
             <div className="flex rounded overflow-hidden h-4 text-[10px] font-bold">
               <div className="flex items-center justify-center bg-violet-700 text-white" style={{ width: `${trainPct}%` }}>
                 {trainPct > 10 ? `Train ${trainPct}%` : ''}
               </div>
-              <div className="flex items-center justify-center bg-teal-700 text-white" style={{ width: `${valPct}%` }}>
-                {valPct > 10 ? `Val ${valPct}%` : ''}
+              <div className="flex items-center justify-center bg-teal-700 text-white" style={{ width: `${effectiveValPct}%` }}>
+                {effectiveValPct > 10 ? `Val ${effectiveValPct}%` : ''}
               </div>
-              <div className="flex items-center justify-center bg-amber-700 text-white" style={{ width: `${testPct}%` }}>
-                {testPct > 10 ? `Test ${testPct}%` : ''}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-3 gap-3">
-              {[
-                { label: 'Train %', value: trainPct, set: (v: number) => { setTrainPct(v); if (v + valPct > 95) setValPct(95 - v) }, min: 10, max: 90 },
-                { label: 'Val %', value: valPct, set: setValPct, min: 5, max: Math.max(5, 90 - trainPct) },
-                { label: 'Test %', value: testPct, set: () => {}, min: 0, max: 0, readonly: true },
-              ].map(({ label, value, set, min, max, readonly }) => (
-                <div key={label} className="flex flex-col gap-1">
-                  <label className="text-xs text-slate-400">{label}</label>
-                  {readonly ? (
-                    <p className="text-sm text-slate-300 text-center">{value}% (remainder)</p>
-                  ) : (
-                    <>
-                      <input type="range" min={min} max={max} value={value} onChange={e => set(+e.target.value)} className="accent-violet-500" />
-                      <span className="text-xs text-slate-300 text-center">{value}%</span>
-                    </>
-                  )}
+              {includeTest && (
+                <div className="flex items-center justify-center bg-amber-700 text-white" style={{ width: `${testPct}%` }}>
+                  {testPct > 10 ? `Test ${testPct}%` : ''}
                 </div>
-              ))}
+              )}
             </div>
 
-            <Toggle label="Generate data.yaml (YOLOv8)" checked={generateYaml} onChange={setGenerateYaml} />
+            {/* Sliders */}
+            {includeTest ? (
+              <div className="grid grid-cols-3 gap-3">
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs text-slate-400">Train %</label>
+                  <input type="range" min={10} max={90} value={trainPct}
+                    onChange={e => { const v = +e.target.value; setTrainPct(v); if (v + valPct > 95) setValPct(95 - v) }}
+                    className="accent-violet-500" />
+                  <span className="text-xs text-slate-300 text-center">{trainPct}%</span>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs text-slate-400">Val %</label>
+                  <input type="range" min={5} max={Math.max(5, 90 - trainPct)} value={valPct}
+                    onChange={e => setValPct(+e.target.value)}
+                    className="accent-violet-500" />
+                  <span className="text-xs text-slate-300 text-center">{valPct}%</span>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs text-slate-400">Test %</label>
+                  <p className="text-sm text-slate-300 text-center">{testPct}% (remainder)</p>
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs text-slate-400">Train %</label>
+                  <input type="range" min={10} max={90} value={trainPct}
+                    onChange={e => setTrainPct(+e.target.value)}
+                    className="accent-violet-500" />
+                  <span className="text-xs text-slate-300 text-center">{trainPct}%</span>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs text-slate-400">Val %</label>
+                  <p className="text-sm text-slate-300 text-center">{100 - trainPct}% (remainder)</p>
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-center gap-4 flex-wrap">
+              <Toggle label="Include test split" checked={includeTest} onChange={v => setIncludeTest(v)} />
+              <Toggle label="Generate data.yaml (YOLOv8)" checked={generateYaml} onChange={setGenerateYaml} />
+            </div>
           </>
         )}
       </div>
@@ -233,17 +266,32 @@ export function MergeDatasets() {
       </div>
 
       {/* ── Output ── */}
-      <div className="bg-[#16213e] border border-[#1e293b] rounded-xl p-4">
-        <SectionHeader label="Output Directory" />
+      <div className="bg-[#16213e] border border-[#1e293b] rounded-xl p-4 flex flex-col gap-3">
+        <SectionHeader label="Output" />
         <PathInput
-          label=""
+          label="Parent folder"
           value={outputDir}
           onChange={setOutputDir}
           filter="dir"
           dirOnly={true}
-          placeholder="/villapro-data/merged_dataset/"
-          pickerTitle="Select output folder"
+          placeholder="/villapro-data/datasets/"
+          pickerTitle="Select parent folder"
         />
+        <div className="flex flex-col gap-1.5">
+          <label className="text-xs font-medium text-slate-400">Dataset name</label>
+          <input
+            value={datasetName}
+            onChange={e => setDatasetName(e.target.value)}
+            placeholder="merged_dataset"
+            className="bg-[#0f172a] border border-[#334155] rounded px-3 py-1.5 text-sm text-slate-100
+              placeholder:text-slate-600 focus:outline-none focus:border-violet-500 font-mono"
+          />
+          {outputDir && (
+            <p className="text-[11px] text-slate-500 font-mono">
+              → <span className="text-slate-400">{effectiveOutputDir}</span>
+            </p>
+          )}
+        </div>
       </div>
 
       {/* ── Result / Progress ── */}
@@ -251,8 +299,6 @@ export function MergeDatasets() {
         const total = job?.total ?? 0
         const progress = job?.progress ?? 0
         const pct = total > 0 ? Math.round((progress / total) * 100) : 0
-        const showBar = isRunning && total > 0
-
         if (isDone) return (
           <div className="flex flex-col gap-2 px-4 py-4 rounded-xl border bg-green-950 border-green-500">
             <div className="flex items-center gap-2">
@@ -266,30 +312,40 @@ export function MergeDatasets() {
               <span>{result?.annotations ?? 0} annotations</span>
               <span>{result?.classes ?? 0} classes</span>
             </div>
+            <p className="text-xs text-slate-500 font-mono pl-6">{effectiveOutputDir}</p>
           </div>
         )
 
         return (
-          <div className={`flex flex-col gap-2 px-4 py-3 rounded-xl text-sm border
+          <div className={`flex flex-col gap-3 px-4 py-3 rounded-xl text-sm border
             ${isFailed ? 'bg-red-900/20 border-red-700 text-red-300'
             : 'bg-slate-800 border-slate-700 text-slate-300'}`}>
-            <div className="flex items-center gap-3">
-              {isRunning && <Spinner size={16} />}
-              {isFailed && <span className="text-red-400">✗</span>}
-              <span>
-                {mergeMut.isPending && !jobId ? 'Starting…' :
-                 showBar ? `Merging… ${progress} / ${total} images (${pct}%)` :
-                 job?.status === 'running' ? 'Merging datasets…' :
-                 isCancelled ? 'Cancelled' :
-                 isFailed ? `Failed: ${job?.error}` : ''}
-              </span>
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                {isRunning && <Spinner size={16} />}
+                {isFailed && <span className="text-red-400">✗</span>}
+                <span>
+                  {mergeMut.isPending && !jobId ? 'Starting…' :
+                   total > 0 ? `Merging… ${progress} / ${total} images` :
+                   job?.status === 'running' ? 'Loading sources…' :
+                   isCancelled ? 'Cancelled' :
+                   isFailed ? `Failed: ${job?.error}` : ''}
+                </span>
+              </div>
+              {total > 0 && (
+                <span className="text-xs font-mono text-violet-300 shrink-0">{pct}%</span>
+              )}
             </div>
-            {showBar && (
-              <div className="w-full bg-slate-700 rounded-full h-1.5 overflow-hidden">
-                <div
-                  className="bg-violet-500 h-1.5 rounded-full transition-all duration-300"
-                  style={{ width: `${pct}%` }}
-                />
+            {isRunning && (
+              <div className="w-full bg-slate-700 rounded-full h-3 overflow-hidden">
+                {total > 0 ? (
+                  <div
+                    className="h-full bg-violet-600 rounded-full transition-all duration-300"
+                    style={{ width: `${pct}%` }}
+                  />
+                ) : (
+                  <div className="h-full w-1/3 bg-violet-600/60 rounded-full animate-pulse" />
+                )}
               </div>
             )}
           </div>

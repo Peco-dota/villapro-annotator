@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getRecentProjects, openProject, createProject, getSystemInfo, removeRecentProject, getActiveTrain } from '../lib/api'
+import { getRecentProjects, openProject, createProject, getSystemInfo, removeRecentProject, getActiveTrain, getActiveMergeJob, dismissMergeJob, getActiveAugJob, getServices } from '../lib/api'
 import { getUser, clearToken } from '../lib/auth'
 import { Button } from '../components/ui/Button'
 import { Modal } from '../components/ui/Modal'
@@ -15,6 +15,7 @@ import { TrainModel } from '../components/train/TrainModel'
 import { DetectionSection } from '../components/detection/DetectionSection'
 import { RecordingsSection } from '../components/recordings/RecordingsSection'
 import { DebugLogsSection } from '../components/debug/DebugLogsSection'
+import { FilesSection } from '../components/files/FilesSection'
 
 interface RecentProject {
   name: string
@@ -37,10 +38,10 @@ function CreateProjectModal({ open, onClose }: { open: boolean; onClose: () => v
   const [form, setForm] = useState({
     name: '',
     save_path: '',
-    image_folder: '',
     import_yolo_labels: false,
     coco_json_path: '',
   })
+  const [imageFolders, setImageFolders] = useState<string[]>([''])
   const [classes, setClasses] = useState<string[]>([])
   const [newClass, setNewClass] = useState('')
   const [err, setErr] = useState('')
@@ -56,7 +57,7 @@ function CreateProjectModal({ open, onClose }: { open: boolean; onClose: () => v
     mutationFn: () => createProject({
       name: form.name,
       save_path: form.save_path,
-      image_folder: form.image_folder,
+      image_folders: imageFolders.filter(f => f.trim()),
       import_yolo_labels: form.import_yolo_labels,
       coco_json_path: form.coco_json_path || undefined,
       classes,
@@ -74,6 +75,8 @@ function CreateProjectModal({ open, onClose }: { open: boolean; onClose: () => v
 
   const set = (k: keyof typeof form) => (v: string | boolean) =>
     setForm(f => ({ ...f, [k]: v }))
+
+  const filledFolders = imageFolders.filter(f => f.trim())
 
   return (
     <Modal open={open} onClose={onClose} title="Create New Project" width="max-w-lg">
@@ -94,15 +97,37 @@ function CreateProjectModal({ open, onClose }: { open: boolean; onClose: () => v
           placeholder="(auto — /data/projects/<username>/)"
           pickerTitle="Choose save location"
         />
-        <PathInput
-          label="Images directory"
-          value={form.image_folder}
-          onChange={v => set('image_folder')(v)}
-          filter="dir"
-          dirOnly={true}
-          placeholder="/data/images/"
-          pickerTitle="Select images folder"
-        />
+
+        {/* Image folders */}
+        <div className="flex flex-col gap-2">
+          <p className="text-xs font-medium text-slate-400">Image folders</p>
+          {imageFolders.map((folder, i) => (
+            <div key={i} className="flex items-end gap-2">
+              <div className="flex-1">
+                <PathInput
+                  label=""
+                  value={folder}
+                  onChange={v => setImageFolders(fs => fs.map((f, j) => j === i ? v : f))}
+                  filter="dir"
+                  dirOnly={true}
+                  placeholder="/data/images/"
+                  pickerTitle={`Select images folder ${i + 1}`}
+                />
+              </div>
+              {imageFolders.length > 1 && (
+                <button
+                  onClick={() => setImageFolders(fs => fs.filter((_, j) => j !== i))}
+                  className="mb-0.5 px-2 py-1.5 text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded text-sm cursor-pointer"
+                  title="Remove folder"
+                >×</button>
+              )}
+            </div>
+          ))}
+          <button
+            onClick={() => setImageFolders(fs => [...fs, ''])}
+            className="self-start text-xs text-violet-400 hover:text-violet-300 cursor-pointer"
+          >+ Add another folder</button>
+        </div>
 
         {/* Classes */}
         <div className="flex flex-col gap-2 pt-1 border-t border-slate-700/50">
@@ -166,7 +191,7 @@ function CreateProjectModal({ open, onClose }: { open: boolean; onClose: () => v
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button
             variant="primary"
-            disabled={mut.isPending || !form.name || !form.image_folder}
+            disabled={mut.isPending || !form.name || filledFolders.length === 0}
             onClick={() => { setErr(''); mut.mutate() }}
           >
             {mut.isPending ? <Spinner size={12} /> : null}
@@ -190,6 +215,7 @@ function AnnotateSection() {
   const [openPickerOpen, setOpenPickerOpen] = useState(false)
   const [openErr, setOpenErr] = useState('')
   const [showAll, setShowAll] = useState(false)
+  const [confirmDeletePath, setConfirmDeletePath] = useState<string | null>(null)
 
   const { data: recent = [], isLoading } = useQuery<RecentProject[]>({
     queryKey: ['recent', showAll],
@@ -252,7 +278,7 @@ function AnnotateSection() {
       ) : (
         <div className="grid gap-2">
           {recent.map((p) => (
-            <div key={p.path} className="relative group bg-[#16213e] border border-[#1e293b] hover:border-violet-500/40 rounded-xl transition-all">
+            <div key={p.path} className="relative group bg-[#16213e] border border-[#1e293b] hover:border-violet-500/40 rounded-xl transition-all overflow-hidden">
               <button
                 onClick={() => openMut.mutate(p.path)}
                 disabled={openMut.isPending}
@@ -269,14 +295,30 @@ function AnnotateSection() {
                   </div>
                 </div>
               </button>
-              <button
-                onClick={() => removeMut.mutate(p.path)}
-                disabled={removeMut.isPending}
-                title="Remove from list"
-                className="absolute top-2.5 right-2.5 w-6 h-6 flex items-center justify-center rounded
-                  text-slate-600 hover:text-red-400 hover:bg-red-400/10 transition-colors cursor-pointer
-                  opacity-0 group-hover:opacity-100"
-              >×</button>
+              {confirmDeletePath === p.path ? (
+                <div className="absolute inset-0 flex items-center justify-between px-4 bg-[#1a1a2e] border border-red-700/50 rounded-xl">
+                  <span className="text-sm text-red-300">Remove from list?</span>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setConfirmDeletePath(null)}
+                      className="px-3 py-1 text-xs text-slate-400 hover:text-slate-200 bg-slate-700 hover:bg-slate-600 rounded cursor-pointer"
+                    >Cancel</button>
+                    <button
+                      onClick={() => { removeMut.mutate(p.path); setConfirmDeletePath(null) }}
+                      disabled={removeMut.isPending}
+                      className="px-3 py-1 text-xs text-white bg-red-700 hover:bg-red-600 rounded cursor-pointer disabled:opacity-60"
+                    >Remove</button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setConfirmDeletePath(p.path)}
+                  title="Remove from list"
+                  className="absolute top-2.5 right-2.5 w-6 h-6 flex items-center justify-center rounded
+                    text-slate-600 hover:text-red-400 hover:bg-red-400/10 transition-colors cursor-pointer
+                    opacity-0 group-hover:opacity-100"
+                >×</button>
+              )}
             </div>
           ))}
         </div>
@@ -292,7 +334,7 @@ function NavTile({
 }: {
   icon: React.ReactNode
   label: string
-  description: string
+  description: React.ReactNode
   onClick: () => void
   active?: boolean
   badge?: React.ReactNode
@@ -381,9 +423,17 @@ const IconDebugLogs = () => (
   </svg>
 )
 
+const IconFiles = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+    <path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6z" />
+    <line x1="9" y1="13" x2="15" y2="13" />
+    <line x1="12" y1="10" x2="12" y2="16" />
+  </svg>
+)
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-type Section = 'annotate' | 'merge' | 'augment' | 'train' | 'detection' | 'recordings' | 'debug-logs'
+type Section = 'annotate' | 'merge' | 'augment' | 'train' | 'detection' | 'recordings' | 'debug-logs' | 'files'
 
 export function WelcomePage() {
   const nav = useNavigate()
@@ -392,8 +442,18 @@ export function WelcomePage() {
   const activeSection = (searchParams.get('tab') as Section | null) ?? 'annotate'
   const setActiveSection = (s: Section) => setSearchParams({ tab: s }, { replace: true })
 
+  const qc = useQueryClient()
   const { data: info } = useQuery({ queryKey: ['sysinfo'], queryFn: getSystemInfo, retry: false })
-  const { data: trainActive } = useQuery({ queryKey: ['train-active'], queryFn: getActiveTrain, refetchInterval: 3000 })
+  const { data: trainActive } = useQuery({ queryKey: ['train-active'], queryFn: getActiveTrain, refetchInterval: (q) => q.state.data?.status === 'running' ? 2000 : 10000 })
+  const { data: mergeActive } = useQuery({ queryKey: ['merge-active'], queryFn: getActiveMergeJob, refetchInterval: (q) => q.state.data?.status === 'running' ? 2000 : 10000 })
+  const { data: augActive } = useQuery({ queryKey: ['aug-active'], queryFn: getActiveAugJob, refetchInterval: (q) => q.state.data?.status === 'running' ? 2000 : 10000 })
+  const { data: allServices } = useQuery({ queryKey: ['services'], queryFn: getServices, refetchInterval: 5000 })
+  const runningCount = (allServices ?? []).filter((s: { state: string }) => s.state === 'running').length
+
+  const dismissMergeMut = useMutation({
+    mutationFn: dismissMergeJob,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['merge-active'] }),
+  })
 
   const logout = () => { clearToken(); nav('/login') }
 
@@ -420,7 +480,7 @@ export function WelcomePage() {
 
       <div className="flex flex-1 overflow-hidden">
         {/* Left nav */}
-        <aside className="w-72 border-r border-[#1e293b] p-4 flex flex-col gap-2 shrink-0">
+        <aside className="w-72 border-r border-[#1e293b] p-4 flex flex-col gap-2 shrink-0 overflow-y-auto">
           <p className="text-[10px] font-bold text-slate-600 uppercase tracking-widest px-1 mb-1">Workspace</p>
 
           <NavTile
@@ -433,36 +493,103 @@ export function WelcomePage() {
           <NavTile
             icon={<IconMerge />}
             label="Merge Datasets"
-            description="Combine multiple projects into one"
+            description={
+              mergeActive?.active && mergeActive.status === 'running' && mergeActive.total > 0
+                ? `${mergeActive.progress ?? 0} / ${mergeActive.total} images`
+                : 'Combine multiple projects into one'
+            }
             onClick={() => setActiveSection('merge')}
             active={activeSection === 'merge'}
+            badge={mergeActive?.active ? (
+              mergeActive.status === 'running' ? (
+                <span className="flex items-center gap-1 text-[10px] font-bold text-teal-300 bg-teal-900/40 border border-teal-500/30 px-1.5 py-0.5 rounded-full">
+                  <span className="w-1.5 h-1.5 rounded-full bg-teal-400 animate-pulse inline-block" />
+                  MERGING
+                </span>
+              ) : mergeActive.status === 'done' ? (
+                <span
+                  className="flex items-center gap-1 text-[10px] font-bold text-green-300 bg-green-900/40 border border-green-500/30 px-1.5 py-0.5 rounded-full cursor-pointer hover:bg-green-900/70"
+                  onClick={e => { e.stopPropagation(); dismissMergeMut.mutate() }}
+                >
+                  ✓ DONE ×
+                </span>
+              ) : mergeActive.status === 'failed' ? (
+                <span
+                  className="flex items-center gap-1 text-[10px] font-bold text-red-300 bg-red-900/40 border border-red-500/30 px-1.5 py-0.5 rounded-full cursor-pointer hover:bg-red-900/70"
+                  onClick={e => { e.stopPropagation(); dismissMergeMut.mutate() }}
+                >
+                  ✗ {mergeActive.error === 'Cancelled' ? 'CANCELLED' : 'FAILED'} ×
+                </span>
+              ) : undefined
+            ) : undefined}
           />
           <NavTile
             icon={<IconAugment />}
             label="Augment"
-            description="Enrich an exported dataset with augmented copies"
+            description={
+              augActive?.active && augActive.status === 'running' && augActive.total > 0
+                ? `${augActive.progress ?? 0} / ${augActive.total} images`
+                : 'Enrich an exported dataset with augmented copies'
+            }
             onClick={() => setActiveSection('augment')}
             active={activeSection === 'augment'}
+            badge={augActive?.active ? (
+              augActive.status === 'running' ? (
+                <span className="flex items-center gap-1 text-[10px] font-bold text-teal-300 bg-teal-900/40 border border-teal-500/30 px-1.5 py-0.5 rounded-full">
+                  <span className="w-1.5 h-1.5 rounded-full bg-teal-400 animate-pulse inline-block" />
+                  AUGMENTING
+                </span>
+              ) : augActive.status === 'done' ? (
+                <span className="flex items-center gap-1 text-[10px] font-bold text-green-300 bg-green-900/40 border border-green-500/30 px-1.5 py-0.5 rounded-full">
+                  ✓ DONE
+                </span>
+              ) : augActive.status === 'failed' ? (
+                <span className="flex items-center gap-1 text-[10px] font-bold text-red-300 bg-red-900/40 border border-red-500/30 px-1.5 py-0.5 rounded-full">
+                  ✗ {augActive.error === 'Cancelled' ? 'CANCELLED' : 'FAILED'}
+                </span>
+              ) : undefined
+            ) : undefined}
           />
           <NavTile
             icon={<IconTrain />}
             label="Train Model"
-            description={trainActive?.active
-              ? `Epoch ${trainActive.epoch ?? 0}/${trainActive.total_epochs ?? '?'} — ${trainActive.run_name}`
-              : 'Train YOLO from an annotated dataset'}
+            description={
+              trainActive?.active
+                ? trainActive.status === 'running'
+                  ? `Epoch ${trainActive.epoch ?? 0}/${trainActive.total_epochs ?? '?'} — ${trainActive.run_name}`
+                  : trainActive.status === 'done'
+                    ? `Completed — ${trainActive.run_name}`
+                    : (trainActive.error?.includes('Cancelled') || trainActive.error?.includes('Force-stopped'))
+                      ? `Cancelled — ${trainActive.run_name}`
+                      : `Failed — ${trainActive.run_name}`
+                : 'Train YOLO from an annotated dataset'
+            }
             onClick={() => setActiveSection('train')}
             active={activeSection === 'train'}
             badge={trainActive?.active ? (
-              <span className="flex items-center gap-1 text-[10px] font-bold text-violet-300 bg-violet-900/40 border border-violet-500/30 px-1.5 py-0.5 rounded-full">
-                <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse inline-block" />
-                TRAINING
-              </span>
+              trainActive.status === 'running' ? (
+                <span className="flex items-center gap-1 text-[10px] font-bold text-violet-300 bg-violet-900/40 border border-violet-500/30 px-1.5 py-0.5 rounded-full">
+                  <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse inline-block" />
+                  TRAINING
+                </span>
+              ) : trainActive.status === 'done' ? (
+                <span className="flex items-center gap-1 text-[10px] font-bold text-green-300 bg-green-900/40 border border-green-500/30 px-1.5 py-0.5 rounded-full">
+                  ✓ DONE
+                </span>
+              ) : trainActive.status === 'failed' ? (
+                <span className="flex items-center gap-1 text-[10px] font-bold text-red-300 bg-red-900/40 border border-red-500/30 px-1.5 py-0.5 rounded-full">
+                  ✗ {(trainActive.error?.includes('Cancelled') || trainActive.error?.includes('Force-stopped')) ? 'CANCELLED' : 'FAILED'}
+                </span>
+              ) : undefined
             ) : undefined}
           />
           <NavTile
             icon={<IconDetection />}
             label="Detection"
-            description="Run and monitor detection services"
+            description={runningCount > 0
+              ? <span className="flex items-center gap-1.5 text-teal-400 font-medium"><span className="w-1.5 h-1.5 rounded-full bg-teal-400 animate-pulse shrink-0 inline-block" />{runningCount} service{runningCount !== 1 ? 's' : ''} running</span>
+              : 'Run and monitor detection services'
+            }
             onClick={() => setActiveSection('detection')}
             active={activeSection === 'detection'}
           />
@@ -480,6 +607,13 @@ export function WelcomePage() {
             onClick={() => setActiveSection('debug-logs')}
             active={activeSection === 'debug-logs'}
           />
+          <NavTile
+            icon={<IconFiles />}
+            label="Files"
+            description="Browse, upload, download and delete server files"
+            onClick={() => setActiveSection('files')}
+            active={activeSection === 'files'}
+          />
         </aside>
 
         {/* Main content */}
@@ -494,6 +628,7 @@ export function WelcomePage() {
           {activeSection === 'detection' && <DetectionSection />}
           {activeSection === 'recordings' && <RecordingsSection />}
           {activeSection === 'debug-logs' && <DebugLogsSection />}
+          {activeSection === 'files' && <FilesSection />}
 
         </main>
       </div>

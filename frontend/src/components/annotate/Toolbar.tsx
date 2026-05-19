@@ -1,6 +1,4 @@
 interface Props {
-  tool: 'draw' | 'select'
-  onToolChange: (t: 'draw' | 'select') => void
   canUndo: boolean
   canRedo: boolean
   onUndo: () => void
@@ -48,19 +46,6 @@ export function Toolbar(props: Props) {
       <span className="text-violet-400 font-bold text-base tracking-wide px-2 shrink-0">◈ VisionQ</span>
       <div className={vSep} />
 
-      {/* Tools */}
-      <span className={groupLabel}>Tools</span>
-      <button
-        className={iconBtn(props.tool === 'select')}
-        onClick={() => props.onToolChange('select')}
-        title="Select / Move (V)"
-      >⬚</button>
-      <button
-        className={iconBtn(props.tool === 'draw')}
-        onClick={() => props.onToolChange('draw')}
-        title="Draw Rectangle (R)"
-      >⬜</button>
-      <div className={vSep} />
 
       {/* Zoom */}
       <span className={groupLabel}>Zoom</span>

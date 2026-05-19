@@ -80,6 +80,7 @@ _MAX_LOG = 50
 _MISS_TOLERANCE = 2       # consecutive frames without a car before buffer is cleared
 _MIN_DIR_FRAMES = 4       # minimum frames in buffer before direction is considered reliable
 _IDLE_HOLD_FRAMES = 5     # consecutive idle readings required before leaving a moving state
+_AREA_JUMP_RATIO = 0.25   # if new bbox area drops below this fraction of previous, treat as a different car
 
 
 def _best_device() -> str:
@@ -160,6 +161,10 @@ class ServiceConfig:
     tcp_push_ca_certs: str = ""
     # UI kind: "detection" (default) or "counter" (counting-focused service with own stream)
     kind: str = "detection"
+    # Image enhancement applied before YOLO inference (useful for dark/low-contrast footage)
+    enhance_gamma: float = 1.0     # < 1.0 = brighter (try 0.4–0.6 for dark); 1.0 = off
+    enhance_clahe: bool = False    # adaptive local contrast equalization (good for uneven lighting)
+    enhance_clahe_clip: float = 2.0  # CLAHE clip limit — higher = more aggressive (2–8 typical)
 
     @property
     def rtsp_url(self) -> str:
@@ -212,6 +217,9 @@ class ServiceConfig:
             tcp_push_keyfile=d.get("tcp_push_keyfile", ""),
             tcp_push_ca_certs=d.get("tcp_push_ca_certs", ""),
             kind=d.get("kind", "detection"),
+            enhance_gamma=float(d.get("enhance_gamma", 1.0)),
+            enhance_clahe=d.get("enhance_clahe", False),
+            enhance_clahe_clip=float(d.get("enhance_clahe_clip", 2.0)),
         )
 
 
@@ -267,6 +275,34 @@ def _largest_box(result, class_name: str | None = None):
     if not boxes:
         return None
     return max(boxes, key=lambda b: _bbox_area(b))
+
+
+def _quick_direction(buf: list) -> str:
+    """Direction estimate for 2-3 frame tracking buffers using first-to-last comparison.
+
+    Used when the buffer is too short for reliable regression but still contains
+    useful motion data (e.g. the car moved significantly in just 2-3 frames).
+    Camera assumption: forward = cx decreasing (car moves left) and/or area growing.
+    """
+    if len(buf) < 2:
+        return "idle"
+    first, last = buf[0], buf[-1]
+    cx_rel = (last[0] - first[0]) / first[0] if first[0] > 0 else 0.0
+    area_ratio = last[2] / first[2] if first[2] > 0 else 1.0
+    score = 0
+    if cx_rel < -0.05:
+        score += 1
+    elif cx_rel > 0.05:
+        score -= 1
+    if area_ratio > 1.2:
+        score += 1
+    elif area_ratio < 0.83:
+        score -= 1
+    if score > 0:
+        return "forward"
+    if score < 0:
+        return "backward"
+    return "idle"
 
 
 def _determine_direction(
@@ -627,6 +663,11 @@ class DetectionService:
         self._preview_queue: queue.Queue = queue.Queue(maxsize=1)
         # Dataset capture counter (RTSP mode): increments each processed frame
         self._dataset_frame_count: int = 0
+        # Runtime dataset capture state — kept separate from the persisted ServiceConfig
+        # so that the runtime toggle (start/stop dataset button) never mutates the saved config.
+        self._dataset_capturing_active: bool = False
+        self._dataset_dir_runtime: str = ""
+        self._dataset_interval_runtime: int = 10
         self._on_state_change: Optional[Callable[[], None]] = None
         # RTSP reader thread + active cap reference (kept so stop() can force-release the cap)
         self._reader_thread: Optional[threading.Thread] = None
@@ -646,16 +687,23 @@ class DetectionService:
         self._video_duration_ms: float = 0.0
         self._video_paused: bool = False
         self._video_step: bool = False  # step one frame while paused
+        self._video_reverse: bool = False
         # Per-instance direction debug CSV state (each service has its own file)
         self._dbg_lock   = threading.Lock()
         self._dbg_file   = None
         self._dbg_writer = None
         self._dbg_path   = ""
+        # Per-object tracking — only active when a counting service is attached.
+        # Runs as a parallel layer alongside the existing per-class direction logic;
+        # that logic is untouched.
+        self._use_tracking: bool = False
+        self._track_state: dict[tuple[str, int], dict] = {}
+        self._prev_track_ids: set[tuple[str, int]] = set()
 
     @staticmethod
     def _make_class_state() -> dict:
         return {
-            cls: {"buffer": deque(maxlen=8), "misses": 0, "last_state": "", "idle_streak": 0}
+            cls: {"buffer": deque(maxlen=8), "misses": 0, "last_state": "", "idle_streak": 0, "prev_area": 0.0}
             for cls in ("car", "car_rear")
         }
 
@@ -698,6 +746,9 @@ class DetectionService:
         self._state = STATE_LOADING
         self._error_msg = ""
         self._config = cfg
+        self._dataset_capturing_active = cfg.dataset_capture
+        self._dataset_dir_runtime = cfg.dataset_dir
+        self._dataset_interval_runtime = cfg.dataset_interval
         self._class_state = self._make_class_state()
         self._gate_last_open = False
         self._dataset_frame_count = 0
@@ -870,15 +921,20 @@ class DetectionService:
                     break
 
                 try:
+                    if cfg.enhance_gamma != 1.0 or cfg.enhance_clahe:
+                        frame = self._enhance_frame(frame, cfg.enhance_gamma, cfg.enhance_clahe, cfg.enhance_clahe_clip)
                     with torch.no_grad():
-                        results = m(frame, conf=cfg.conf_threshold, verbose=False)
+                        if self._use_tracking:
+                            results = m.track(frame, conf=cfg.conf_threshold, verbose=False, persist=True)
+                        else:
+                            results = m(frame, conf=cfg.conf_threshold, verbose=False)
                     self._dataset_frame_count += 1
                     frame_summary = self._process_rtsp_frame(
                         results, frame, output_url, cfg.name,
                         cfg.strict_output,
                         cfg.state_changes_only,
-                        cfg.dataset_capture, cfg.dataset_interval,
-                        cfg.dataset_dir, self._dataset_frame_count,
+                        self._dataset_capturing_active, self._dataset_interval_runtime,
+                        self._dataset_dir_runtime, self._dataset_frame_count,
                         cfg.gate_area_threshold,
                     )
                     if frame_summary:
@@ -975,6 +1031,7 @@ class DetectionService:
                 self._video_pos_ms = 0.0
                 self._video_paused = False
                 self._video_step = False
+                self._video_reverse = False
 
             loop_count = 0
             while not self._stop_event.is_set():
@@ -984,6 +1041,7 @@ class DetectionService:
                     speed = self._video_speed
                     paused = self._video_paused
                     step = self._video_step
+                    reverse = self._video_reverse
                     if step:
                         self._video_step = False  # consume the step request
 
@@ -998,6 +1056,15 @@ class DetectionService:
                     with self._video_state_lock:
                         self._video_seek_target_ms = -1.0
                         self._video_pos_ms = seek_target
+
+                _rev_target: float = -1.0
+                if reverse and seek_target < 0:
+                    # Seek back the same video-time distance that forward mode
+                    # advances per iteration (rtsp_interval seconds of video).
+                    _step_ms = (cfg.rtsp_interval / max(0.1, speed)) * 1000.0
+                    with self._video_state_lock:
+                        _rev_target = max(0.0, self._video_pos_ms - _step_ms)
+                    _cap.set(_cv2.CAP_PROP_POS_MSEC, _rev_target)
 
                 try:
                     ret, frame = _cap.read()
@@ -1033,9 +1100,15 @@ class DetectionService:
                         break
                 else:
                     # Update current position so the UI slider can track progress
-                    pos_ms = _cap.get(_cv2.CAP_PROP_POS_MSEC)
-                    with self._video_state_lock:
-                        self._video_pos_ms = pos_ms
+                    if _rev_target >= 0:
+                        with self._video_state_lock:
+                            self._video_pos_ms = _rev_target
+                            if _rev_target == 0.0:
+                                self._video_paused = True
+                    else:
+                        pos_ms = _cap.get(_cv2.CAP_PROP_POS_MSEC)
+                        with self._video_state_lock:
+                            self._video_pos_ms = pos_ms
 
                 with latest_lock:
                     latest["frame"] = frame
@@ -1048,10 +1121,11 @@ class DetectionService:
                 # decode 1 → 4 processed/s, but position moves 25 frames/s = real speed.
                 if not paused:
                     self._stop_event.wait(timeout=cfg.rtsp_interval / max(0.1, speed))
-                    _skip = max(0, round(_fps * cfg.rtsp_interval) - 1)
-                    for _ in range(_skip):
-                        if not _cap.grab():
-                            break
+                    if not reverse:
+                        _skip = max(0, round(_fps * cfg.rtsp_interval) - 1)
+                        for _ in range(_skip):
+                            if not _cap.grab():
+                                break
 
             _cap.release()
             with self._cap_lock:
@@ -1077,15 +1151,20 @@ class DetectionService:
                     break
 
                 try:
+                    if cfg.enhance_gamma != 1.0 or cfg.enhance_clahe:
+                        frame = self._enhance_frame(frame, cfg.enhance_gamma, cfg.enhance_clahe, cfg.enhance_clahe_clip)
                     with torch.no_grad():
-                        results = m(frame, conf=cfg.conf_threshold, verbose=False)
+                        if self._use_tracking:
+                            results = m.track(frame, conf=cfg.conf_threshold, verbose=False, persist=True)
+                        else:
+                            results = m(frame, conf=cfg.conf_threshold, verbose=False)
                     self._dataset_frame_count += 1
                     _vs = self._process_rtsp_frame(
                         results, frame, output_url, cfg.name,
                         cfg.strict_output,
                         cfg.state_changes_only,
-                        cfg.dataset_capture, cfg.dataset_interval,
-                        cfg.dataset_dir, self._dataset_frame_count,
+                        self._dataset_capturing_active, self._dataset_interval_runtime,
+                        self._dataset_dir_runtime, self._dataset_frame_count,
                         cfg.gate_area_threshold,
                     )
                     if _vs:
@@ -1313,25 +1392,19 @@ class DetectionService:
 
     @property
     def is_dataset_capturing(self) -> bool:
-        cfg = self._config
-        return cfg is not None and cfg.dataset_capture
+        return self._dataset_capturing_active
 
     def start_dataset_capture(self, dataset_dir: str = "", interval: int = 10) -> str:
         if self._state != STATE_RUNNING:
             return "Service must be running before dataset capture can start."
-        cfg = self._config
-        if cfg is None:
-            return "No config."
         if dataset_dir:
-            cfg.dataset_dir = dataset_dir
-        cfg.dataset_interval = interval
-        cfg.dataset_capture = True
+            self._dataset_dir_runtime = dataset_dir
+        self._dataset_interval_runtime = interval
+        self._dataset_capturing_active = True
         return ""
 
     def stop_dataset_capture(self):
-        cfg = self._config
-        if cfg is not None:
-            cfg.dataset_capture = False
+        self._dataset_capturing_active = False
 
     # ── Video playback controls ────────────────────────────────────────────────
 
@@ -1364,14 +1437,57 @@ class DetectionService:
             return self._video_paused
 
     def step_video_frame(self):
-        """While paused, advance exactly one frame. Has no effect when playing."""
+        """While paused, advance exactly one frame (or back one frame if reverse is active)."""
         with self._video_state_lock:
             self._video_step = True
 
-    def get_video_state(self) -> tuple:
-        """Return (pos_ms, duration_ms, speed, paused). Safe to call from Qt main thread."""
+    def toggle_video_reverse(self) -> bool:
+        """Toggle reverse playback. Returns new reverse state."""
         with self._video_state_lock:
-            return self._video_pos_ms, self._video_duration_ms, self._video_speed, self._video_paused
+            self._video_reverse = not self._video_reverse
+            return self._video_reverse
+
+    def get_video_state(self) -> tuple:
+        """Return (pos_ms, duration_ms, speed, paused, reverse)."""
+        with self._video_state_lock:
+            return self._video_pos_ms, self._video_duration_ms, self._video_speed, self._video_paused, self._video_reverse
+
+    def enable_tracking(self):
+        """Enable per-object tracking. Called by the counting service on start."""
+        self._use_tracking = True
+        self._track_state.clear()
+        self._prev_track_ids.clear()
+
+    def disable_tracking(self):
+        """Disable per-object tracking. Called by the counting service on stop."""
+        self._use_tracking = False
+        self._track_state.clear()
+        self._prev_track_ids.clear()
+
+    @staticmethod
+    def _enhance_frame(frame, gamma: float, use_clahe: bool, clahe_clip: float):
+        """Apply image enhancement before YOLO inference.
+
+        gamma < 1.0 brightens (good for uniformly dark footage, e.g. 0.4–0.6).
+        CLAHE improves local contrast (good for uneven / mixed parking-lot lighting).
+        Both can be combined.  Returns the original array unchanged when both are off.
+        """
+        import cv2
+        import numpy as np
+
+        if gamma != 1.0:
+            inv = 1.0 / max(0.01, gamma)
+            lut = (np.arange(256, dtype=np.float32) / 255.0) ** inv * 255.0
+            lut = np.clip(lut, 0, 255).astype(np.uint8)
+            frame = cv2.LUT(frame, lut)
+
+        if use_clahe:
+            yuv = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
+            clahe_obj = cv2.createCLAHE(clipLimit=max(0.1, clahe_clip), tileGridSize=(8, 8))
+            yuv[:, :, 0] = clahe_obj.apply(yuv[:, :, 0])
+            frame = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
+
+        return frame
 
     def _process_rtsp_frame(
         self, results, frame, output_url: Optional[str], service_name: str,
@@ -1401,15 +1517,31 @@ class DetectionService:
             detected = box is not None
 
             if detected:
-                state["misses"] = 0
                 cx, cy = _bbox_centroid(box)
+                curr_area = _bbox_area(box)
                 confidence = float(box.conf[0])
-                buf.append((cx, cy, _bbox_area(box)))
+                prev_area = state["prev_area"]
+                if prev_area > 0 and curr_area < _AREA_JUMP_RATIO * prev_area:
+                    # Bbox area dropped drastically in one frame — the old car left and a
+                    # new (smaller) car entered within the same detection window.  Emit a
+                    # synthetic no_car so the counting service's grace timer fires for the
+                    # departing car before the new car's detections cancel it.
+                    buf.clear()
+                    state["misses"] = _MISS_TOLERANCE
+                    state["idle_streak"] = 0
+                    state["prev_area"] = 0.0
+                    detected = False
+                    confidence = 0.0
+                else:
+                    state["misses"] = 0
+                    buf.append((cx, cy, curr_area))
+                    state["prev_area"] = curr_area
             else:
                 confidence = 0.0
                 state["misses"] += 1
                 if state["misses"] >= _MISS_TOLERANCE:
                     buf.clear()
+                    state["prev_area"] = 0.0
 
             buf_list = list(buf)
             if not detected:
@@ -1498,6 +1630,102 @@ class DetectionService:
                 "_area":          _bbox_area(box) if detected else 0.0,
             }
 
+        # ── Per-object tracking (counting service only) ───────────────────────
+        # Runs independently of the per-class direction logic above.  Uses YOLO
+        # track IDs to detect exactly when a specific car leaves the frame, even
+        # when another car is already visible.
+        track_events: list[dict] | None = None
+        if self._use_tracking:
+            track_events = []
+            has_ids = (
+                result.boxes is not None
+                and result.boxes.id is not None
+                and len(result.boxes.id) > 0
+            )
+            current_ids: set[tuple[str, int]] = set()
+
+            if has_ids:
+                for tbox in result.boxes:
+                    if tbox.id is None:
+                        continue
+                    cls_int  = int(tbox.cls[0])
+                    cls_name = result.names.get(cls_int)
+                    if cls_name not in ("car", "car_rear"):
+                        continue
+                    track_id = int(tbox.id[0])
+                    key      = (cls_name, track_id)
+                    current_ids.add(key)
+
+                    ts = self._track_state.setdefault(
+                        key,
+                        {"buffer": deque(maxlen=8), "misses": 0,
+                         "last_state": "", "idle_streak": 0},
+                    )
+                    tcx, tcy = _bbox_centroid(tbox)
+                    tarea    = _bbox_area(tbox)
+                    ts["misses"] = 0
+                    ts["buffer"].append((tcx, tcy, tarea))
+
+                    tbuf = list(ts["buffer"])
+                    if len(tbuf) >= _MIN_DIR_FRAMES:
+                        if cls_name == "car_rear":
+                            traw = _determine_direction(
+                                tbuf, use_area=False, forward_threshold=2,
+                                backward_threshold=-1, signal_threshold=0.005,
+                            )
+                        else:
+                            traw = _determine_direction(tbuf)
+                        tresolved = _invert_direction(traw) if cls_name == "car_rear" else traw
+                        if tresolved == "idle" and ts["last_state"] in ("forward", "backward"):
+                            ts["idle_streak"] += 1
+                            if ts["idle_streak"] < _IDLE_HOLD_FRAMES:
+                                tresolved = ts["last_state"]
+                        else:
+                            ts["idle_streak"] = 0
+                    elif len(tbuf) >= 2:
+                        # For 2-3 frame buffers, use a simpler first-to-last estimate
+                        # so last_state is set early and departure events carry a
+                        # real direction rather than "idle".
+                        tresolved = _quick_direction(tbuf)
+                        if cls_name == "car_rear":
+                            tresolved = _invert_direction(tresolved)
+                        ts["idle_streak"] = 0
+                    else:
+                        tresolved = "idle"
+
+                    ts["last_state"] = tresolved
+                    track_events.append({
+                        "cls": cls_name, "id": track_id,
+                        "detected": True, "direction": tresolved, "area": tarea,
+                    })
+
+            # Increment miss counter for IDs absent from this frame; fire departure only
+            # after _MISS_TOLERANCE consecutive misses — same tolerance as the per-class
+            # buffer logic — so a single dropped YOLO frame does not prematurely close a
+            # track and lose the direction state accumulated so far.
+            for key in list(self._track_state.keys()):
+                if key not in current_ids:
+                    self._track_state[key]["misses"] += 1
+                    if self._track_state[key]["misses"] >= _MISS_TOLERANCE:
+                        ts = self._track_state.pop(key, {})
+                        dep_dir = ts.get("last_state", "")
+                        buf_len = len(ts.get("buffer", []))
+                        # Per-class fallback ONLY when the tracking buffer was too short
+                        # to compute a reliable direction (fewer than _MIN_DIR_FRAMES
+                        # frames, e.g. ByteTracker lost the ID on a fast IoU break).
+                        # Long-lived tracks that ended in "idle" are left as "idle" so
+                        # the counting service can use its cached st["last_dir"].
+                        if dep_dir not in ("forward", "backward") and buf_len < _MIN_DIR_FRAMES:
+                            dep_dir = class_results.get(key[0], {}).get("direction", dep_dir)
+                        track_events.append({
+                            "cls": key[0], "id": key[1],
+                            "detected": False,
+                            "direction": dep_dir,
+                            "area": 0,
+                        })
+
+            self._prev_track_ids = current_ids
+
         # ── Gate open detection ───────────────────────────────────────────────
         # Gate opens for incoming cars only (class "car", not "car_rear").
         # Conditions: car detected, direction confirmed as idle (not still building),
@@ -1519,14 +1747,17 @@ class DetectionService:
                 "detected":   car_res["detected"],
                 "direction":  car_res["direction"],
                 "confidence": car_res["confidence"],
+                "area":       car_res["_area"],
             },
             "car_rear": {
                 "detected":   class_results["car_rear"]["detected"],
                 "direction":  class_results["car_rear"]["direction"],
                 "confidence": class_results["car_rear"]["confidence"],
+                "area":       class_results["car_rear"]["_area"],
             },
             "gate": {"open": gate_open},
             "frames_analyzed": 1,
+            "track_events": track_events,  # None when tracking disabled
         }
 
         if state_changes_only:
@@ -1560,6 +1791,11 @@ class DetectionService:
                               and class_results["car_rear"]["_misses"] == _MISS_TOLERANCE)
             should_report = car_ok or rear_ok or car_just_gone or rear_just_gone
         else:
+            should_report = True
+
+        # Tracking departure events must always reach the counting service, even
+        # when state_changes_only / strict_output would otherwise suppress this frame.
+        if track_events and any(not e["detected"] for e in track_events):
             should_report = True
 
         if should_report:

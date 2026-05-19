@@ -168,6 +168,19 @@ def get_service_status(name: str, _user: dict = Depends(require_user)):
     }
 
 
+@router.get("/services/{name}/result")
+def get_service_result(name: str, _user: dict = Depends(require_user)):
+    """Return the last counting result for this counter (same payload as SSE/TCP push)."""
+    reg = get_counting_registry()
+    if reg.get_config(name) is None:
+        raise HTTPException(status_code=404, detail=f"Counter '{name}' not found.")
+    buf = _counting_result_buffer.get(name)
+    if buf:
+        return buf[0]
+    svc = reg.get_service(name)
+    return {"service_name": name, "available": False, **(svc.get_counts() if svc else {})}
+
+
 # ── Reset ─────────────────────────────────────────────────────────────────────
 
 @router.post("/services/{name}/reset")
@@ -190,12 +203,14 @@ async def sse_stream(name: str, request: Request, token: Optional[str] = None):
     """
     from app.auth import _SECRET, _ALGORITHM
     from jose import JWTError, jwt as _jwt
+    from app.config import get_config
     if not token:
         raise HTTPException(status_code=401, detail="Missing token.")
     try:
         _jwt.decode(token, _SECRET, algorithms=[_ALGORITHM])
     except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token.")
+        if not get_config().validate_token(token):
+            raise HTTPException(status_code=401, detail="Invalid token.")
 
     reg = get_counting_registry()
     if reg.get_config(name) is None:

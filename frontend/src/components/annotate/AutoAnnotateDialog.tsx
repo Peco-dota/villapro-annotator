@@ -17,13 +17,14 @@ export function AutoAnnotateDialog({ open, onClose, projectPath }: Props) {
   const qc = useQueryClient()
   const [modelPath, setModelPath] = useState('')
   const [confidence, setConfidence] = useState(0.25)
+  const [iou, setIou] = useState(0.45)
   const [skipAnnotated, setSkipAnnotated] = useState(true)
   const [jobId, setJobId] = useState<string | null>(null)
 
   const job = useJobPoller(jobId)
 
   const mut = useMutation({
-    mutationFn: () => autoAnnotate({ project_path: projectPath, model_path: modelPath, confidence, skip_annotated: skipAnnotated }),
+    mutationFn: () => autoAnnotate({ project_path: projectPath, model_path: modelPath, confidence, iou, skip_annotated: skipAnnotated }),
     onSuccess: (data) => setJobId(data.job_id),
   })
 
@@ -74,6 +75,22 @@ export function AutoAnnotateDialog({ open, onClose, projectPath }: Props) {
               <div className="flex justify-between text-[10px] text-slate-600">
                 <span>0.05 — more boxes</span>
                 <span>0.95 — fewer, high-conf only</span>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs font-medium text-slate-400">
+                IoU threshold (duplicate suppression): <span className="text-violet-300 font-bold">{iou.toFixed(2)}</span>
+              </label>
+              <input
+                type="range" min="0.1" max="0.9" step="0.05"
+                value={iou}
+                onChange={e => setIou(+e.target.value)}
+                className="w-full accent-violet-500 h-1.5"
+              />
+              <div className="flex justify-between text-[10px] text-slate-600">
+                <span>0.1 — aggressively merge overlaps</span>
+                <span>0.9 — keep near-duplicates</span>
               </div>
             </div>
 

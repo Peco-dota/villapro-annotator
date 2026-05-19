@@ -16,12 +16,15 @@ interface Props {
   initialPath?: string
 }
 
+const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'bmp', 'tiff', 'tif', 'webp'])
+
 const fileIcon = (name: string) => {
   const ext = name.split('.').pop()?.toLowerCase() ?? ''
   if (['pt', 'pth', 'onnx'].includes(ext)) return '🤖'
   if (['yaml', 'yml'].includes(ext)) return '📋'
   if (['json', 'annotatex'].includes(ext)) return '📦'
   if (['mp4', 'avi', 'mov', 'mkv', 'webm'].includes(ext)) return '🎥'
+  if (IMAGE_EXTS.has(ext)) return '🖼'
   return '📄'
 }
 
@@ -233,23 +236,38 @@ export function FilePicker({ open, onClose, onSelect, filter = 'any', dirOnly = 
                 </button>
               ))}
 
-              {/* Files */}
-              {!dirOnly && data.files.map(entry => (
-                <button
-                  key={entry.name}
-                  onClick={() => selectFile(entry)}
-                  className="w-full flex items-center gap-3 px-4 py-2 text-left hover:bg-[#1e293b] transition-colors cursor-pointer"
-                >
-                  <span className="text-base shrink-0">{fileIcon(entry.name)}</span>
-                  <span className="flex-1 text-sm text-slate-300 truncate">{entry.name}</span>
-                  <span className="flex items-center gap-2 text-xs text-slate-600 shrink-0">
-                    {entry.duration != null && (
-                      <span className="text-slate-500">{fmtDuration(entry.duration)}</span>
-                    )}
-                    <span>{fmtSize(entry.size)}</span>
-                    <span>{fmtDate(entry.modified)}</span>
-                  </span>
-                </button>
+              {/* Files — clickable when picking a file, read-only preview when picking a dir */}
+              {data.files.map(entry => (
+                dirOnly ? (
+                  <div
+                    key={entry.name}
+                    className="w-full flex items-center gap-3 px-4 py-2 text-left opacity-50 select-none"
+                    title="Select the folder above to include this file"
+                  >
+                    <span className="text-base shrink-0">{fileIcon(entry.name)}</span>
+                    <span className="flex-1 text-sm text-slate-400 truncate italic">{entry.name}</span>
+                    <span className="flex items-center gap-2 text-xs text-slate-600 shrink-0">
+                      {entry.duration != null && <span>{fmtDuration(entry.duration)}</span>}
+                      <span>{fmtSize(entry.size)}</span>
+                    </span>
+                  </div>
+                ) : (
+                  <button
+                    key={entry.name}
+                    onClick={() => selectFile(entry)}
+                    className="w-full flex items-center gap-3 px-4 py-2 text-left hover:bg-[#1e293b] transition-colors cursor-pointer"
+                  >
+                    <span className="text-base shrink-0">{fileIcon(entry.name)}</span>
+                    <span className="flex-1 text-sm text-slate-300 truncate">{entry.name}</span>
+                    <span className="flex items-center gap-2 text-xs text-slate-600 shrink-0">
+                      {entry.duration != null && (
+                        <span className="text-slate-500">{fmtDuration(entry.duration)}</span>
+                      )}
+                      <span>{fmtSize(entry.size)}</span>
+                      <span>{fmtDate(entry.modified)}</span>
+                    </span>
+                  </button>
+                )
               ))}
             </>
           )}

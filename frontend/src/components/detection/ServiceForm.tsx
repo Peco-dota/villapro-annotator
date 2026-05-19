@@ -49,6 +49,9 @@ const defaults: Omit<ServiceConfig, 'name'> = {
   tcp_push_certfile: '',
   tcp_push_keyfile: '',
   tcp_push_ca_certs: '',
+  enhance_gamma: 1.0,
+  enhance_clahe: false,
+  enhance_clahe_clip: 2.0,
 }
 
 function Section({ label }: { label: string }) {
@@ -114,8 +117,9 @@ export function ServiceForm({ open, onClose, existing, existingCounter }: Props)
       return
     }
 
-    // Editing or creating a detection service
-    setForm(existing ? { ...existing } : { name: '', ...defaults })
+    // Editing or creating a detection service — spread defaults first so any
+    // fields added after the service was created fall back gracefully.
+    setForm(existing ? { ...defaults, ...existing } : { name: '', ...defaults })
     setCounterSource('')
     setInitialCount(0)
     setCounterOutputHost('')
@@ -416,31 +420,6 @@ export function ServiceForm({ open, onClose, existing, existingCounter }: Props)
                   Use the Debug CSV to read the 'area' column while the car is stationary.
                 </p>
 
-                <Section label="Dataset capture" />
-                <Check label="Save raw frames to dataset folder"
-                  checked={form.dataset_capture} onChange={setBool('dataset_capture')} />
-                {form.dataset_capture && (
-                  <>
-                    <Input label="Capture every N frames" type="number" min="1" max="1000"
-                      value={form.dataset_interval} onChange={set('dataset_interval')} />
-                    <PathInput label="Output folder (blank = auto)"
-                      value={form.dataset_dir} onChange={setVal('dataset_dir')}
-                      filter="dir" dirOnly={true} placeholder="Leave blank for default"
-                      pickerTitle="Select dataset folder" />
-                  </>
-                )}
-
-                <Section label="Input recording" />
-                <Check label="Auto-start recording when service starts (RTSP/video only)"
-                  checked={form.record_stream} onChange={setBool('record_stream')}
-                  hint="Recording FPS is set automatically from the frame interval above." />
-                {form.record_stream && (
-                  <PathInput label="Recording folder (blank = ~/VisionQ_recordings/)"
-                    value={form.record_dir} onChange={setVal('record_dir')}
-                    filter="dir" dirOnly={true} placeholder="Leave blank for default"
-                    pickerTitle="Select recording folder" />
-                )}
-
                 <Section label="TCP push" />
                 <Check label="Enable TCP push server"
                   checked={form.tcp_push_enabled} onChange={setBool('tcp_push_enabled')}
@@ -458,6 +437,73 @@ export function ServiceForm({ open, onClose, existing, existingCounter }: Props)
                   </>
                 )}
               </>
+            )}
+
+            <Section label="Image enhancement" />
+            <p className="text-xs text-slate-600">Applied to every frame before YOLO inference. Useful for dark or low-contrast footage.</p>
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-medium text-slate-400">
+                  Gamma: <span className="text-violet-300 font-bold">{form.enhance_gamma.toFixed(2)}</span>
+                  <span className="text-slate-600 ml-2">— 1.0 = off · &gt;1.0 = brighter · try 1.5–2.5 for dark footage</span>
+                </label>
+                <input
+                  type="range" min="0.1" max="2.0" step="0.05"
+                  value={form.enhance_gamma}
+                  onChange={e => setForm(f => ({ ...f, enhance_gamma: +e.target.value }))}
+                  className="w-full accent-violet-500 h-1.5"
+                />
+                <div className="flex justify-between text-[10px] text-slate-600">
+                  <span>0.1 — very dark</span>
+                  <span>1.0 — off</span>
+                  <span>2.0 — very bright</span>
+                </div>
+              </div>
+              <Check
+                label="CLAHE — adaptive local contrast"
+                checked={form.enhance_clahe}
+                onChange={setBool('enhance_clahe')}
+                hint="Best for mixed/uneven lighting (e.g. one lamp illuminating part of the lot). Can combine with gamma."
+              />
+              {form.enhance_clahe && (
+                <div className="flex flex-col gap-1.5 pl-5">
+                  <label className="text-xs font-medium text-slate-400">
+                    Clip limit: <span className="text-violet-300 font-bold">{form.enhance_clahe_clip.toFixed(1)}</span>
+                    <span className="text-slate-600 ml-2">— higher = more aggressive (2–8 typical)</span>
+                  </label>
+                  <input
+                    type="range" min="0.5" max="10" step="0.5"
+                    value={form.enhance_clahe_clip}
+                    onChange={e => setForm(f => ({ ...f, enhance_clahe_clip: +e.target.value }))}
+                    className="w-full accent-violet-500 h-1.5"
+                  />
+                </div>
+              )}
+            </div>
+
+            <Section label="Dataset capture" />
+            <Check label="Save raw frames to dataset folder"
+              checked={form.dataset_capture} onChange={setBool('dataset_capture')} />
+            {form.dataset_capture && (
+              <>
+                <Input label="Capture every N frames" type="number" min="1" max="1000"
+                  value={form.dataset_interval} onChange={set('dataset_interval')} />
+                <PathInput label="Output folder (blank = auto)"
+                  value={form.dataset_dir} onChange={setVal('dataset_dir')}
+                  filter="dir" dirOnly={true} placeholder="Leave blank for default"
+                  pickerTitle="Select dataset folder" />
+              </>
+            )}
+
+            <Section label="Input recording" />
+            <Check label="Auto-start recording when service starts (RTSP/video only)"
+              checked={form.record_stream} onChange={setBool('record_stream')}
+              hint="Recording FPS is set automatically from the frame interval above." />
+            {form.record_stream && (
+              <PathInput label="Recording folder (blank = ~/VisionQ_recordings/)"
+                value={form.record_dir} onChange={setVal('record_dir')}
+                filter="dir" dirOnly={true} placeholder="Leave blank for default"
+                pickerTitle="Select recording folder" />
             )}
 
             {serviceType !== 'detection' && (

@@ -58,10 +58,12 @@ function DeleteButton({ log, onDeleted }: { log: DebugLog; onDeleted: () => void
 export function DebugLogsSection() {
   const queryClient = useQueryClient()
 
-  const { data: logs = [], isLoading, refetch } = useQuery({
+  const { data: logs = [], isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ['debug-logs'],
     queryFn: listDebugLogs,
-    refetchInterval: 15000,
+    refetchInterval: 5000,
+    staleTime: 0,
+    refetchOnMount: 'always',
   })
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['debug-logs'] })
@@ -85,8 +87,17 @@ export function DebugLogsSection() {
             </p>
           )}
         </div>
-        <Button variant="ghost" size="sm" onClick={() => refetch()}>Refresh</Button>
+        <div className="flex items-center gap-2">
+          {isFetching && !isLoading && <Spinner />}
+          <Button variant="ghost" size="sm" onClick={() => refetch()}>Refresh</Button>
+        </div>
       </div>
+
+      {error && (
+        <div className="border border-red-900/40 bg-red-900/10 rounded-xl p-4 text-sm text-red-400">
+          Failed to load debug logs: {(error as Error).message ?? 'Unknown error'}
+        </div>
+      )}
 
       {isLoading && (
         <div className="flex items-center gap-2 text-slate-500 text-sm">
@@ -94,7 +105,7 @@ export function DebugLogsSection() {
         </div>
       )}
 
-      {!isLoading && logs.length === 0 && (
+      {!isLoading && !error && logs.length === 0 && (
         <div className="border border-dashed border-[#1e293b] rounded-xl p-12 text-center">
           <p className="text-slate-500 text-sm">No debug logs found.</p>
           <p className="text-slate-600 text-xs mt-1">

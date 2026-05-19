@@ -45,6 +45,28 @@ temp/
 
 /runs/
 
+# VisionQ — data directory (datasets, projects, models, recordings, config with secrets)
+villapro-data/
+
+# Video files
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.ts
+*.m4v
+*.webm
+*.mts
+
+# Images (dataset frames — can be huge in bulk)
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tiff
+*.tif
+*.webp
+
 # VisionQ — runtime-generated data (never commit these)
 # RTSP / video recordings (also covers the "recodings" typo in folder name)
 VisionQ_recordings/

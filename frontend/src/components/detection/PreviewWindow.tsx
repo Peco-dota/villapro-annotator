@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import {
   getMjpegStreamUrl, getVideoState,
-  videoPause, videoSpeed, videoSeek, videoSeekTo, videoStep,
+  videoPause, videoSpeed, videoSeek, videoSeekTo, videoStep, videoReverse,
 } from '../../lib/api'
 import type { ServiceConfig } from '../../lib/types'
 import { Button } from '../ui/Button'
@@ -45,6 +45,10 @@ export function PreviewWindow({ service, onClose }: Props) {
   const stepMut = useMutation({
     mutationFn: () => videoStep(service.name),
   })
+  const reverseMut = useMutation({
+    mutationFn: () => videoReverse(service.name),
+    onSuccess: () => refetchVideo(),
+  })
 
   const fmtTime = (ms: number) => {
     const s = Math.floor(ms / 1000)
@@ -56,6 +60,7 @@ export function PreviewWindow({ service, onClose }: Props) {
   const dur = videoState?.duration_ms ?? 0
   const paused = videoState?.paused ?? false
   const currentSpeed = videoState?.speed ?? 1
+  const reverse = videoState?.reverse ?? false
 
   const [hoverPct, setHoverPct] = useState<number | null>(null)
 
@@ -124,7 +129,7 @@ export function PreviewWindow({ service, onClose }: Props) {
           )}
 
           {/* Controls row */}
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-2">
             {/* Seek buttons */}
             <Button size="sm" variant="ghost" onClick={() => seekToMut.mutate(0)} title="Go to start">⏮</Button>
             <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(-15000)} title="-15s">-15s</Button>
@@ -135,10 +140,16 @@ export function PreviewWindow({ service, onClose }: Props) {
               {paused ? '▶' : '⏸'}
             </Button>
 
-            {/* Step frame (only while paused) */}
-            {paused && (
-              <Button size="sm" variant="ghost" onClick={() => stepMut.mutate()} title="Step one frame">⏭</Button>
-            )}
+            {/* Reverse */}
+            <Button
+              size="sm" variant="ghost"
+              onClick={() => reverseMut.mutate()}
+              title="Play in reverse"
+              className={reverse ? '!bg-violet-600 !text-white' : ''}
+            >⏪</Button>
+
+            {/* Step frame — always rendered to hold layout space, hidden when playing */}
+            <Button size="sm" variant="ghost" onClick={() => stepMut.mutate()} title={reverse ? 'Step one frame back' : 'Step one frame'} className={paused ? '' : 'invisible'}>⏭</Button>
 
             <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(5000)} title="+5s">+5s</Button>
             <Button size="sm" variant="ghost" onClick={() => seekMut.mutate(15000)} title="+15s">+15s</Button>
