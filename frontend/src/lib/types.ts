@@ -47,13 +47,17 @@ export interface ServiceConfig {
   rtsp_ip: string
   rtsp_port: number
   rtsp_channel: string
+  rtsp_low_latency: boolean
   rtsp_interval: number
   // Video mode
   video_path: string
   video_loop: boolean
   // Detection
   conf_threshold: number
+  gate_trigger_mode: string
   gate_area_threshold: number
+  gate_line: number[]
+  gate_line_side: number[]
   strict_output: boolean
   state_changes_only: boolean
   // Misc

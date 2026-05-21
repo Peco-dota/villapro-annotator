@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getServices, duplicateService } from '../../lib/api'
-import type { ServiceConfig } from '../../lib/types'
+import { getServices, duplicateService, getCounters } from '../../lib/api'
+import type { ServiceConfig, CountingConfig } from '../../lib/types'
 import { ServiceCard } from './ServiceCard'
 import { ServiceForm } from './ServiceForm'
 import { ReceiverDashboard } from './ReceiverDashboard'
@@ -46,6 +46,12 @@ export function DetectionSection() {
     queryKey: ['services'],
     queryFn: getServices,
     refetchInterval: 2000,
+  })
+
+  const { data: allCounters = [] } = useQuery<CountingConfig[]>({
+    queryKey: ['counters'],
+    queryFn: getCounters,
+    refetchInterval: 5000,
   })
 
   const openCreate = () => { setEditTarget(undefined); setFormOpen(true) }
@@ -112,6 +118,7 @@ export function DetectionSection() {
               <ServiceCard
                 key={s.name}
                 service={s}
+                hasCounter={allCounters.some(c => c.name === `${s.name}_counter`)}
                 onEdit={() => openEdit(s)}
                 onDuplicate={() => setDupTarget(s)}
               />

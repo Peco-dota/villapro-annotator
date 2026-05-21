@@ -30,11 +30,15 @@ const defaults: Omit<ServiceConfig, 'name'> = {
   rtsp_ip: '192.168.1.1',
   rtsp_port: 554,
   rtsp_channel: 'Streaming/Channels/102',
+  rtsp_low_latency: false,
   rtsp_interval: 0.25,
   video_path: '',
   video_loop: true,
   conf_threshold: 0.5,
+  gate_trigger_mode: 'off',
   gate_area_threshold: 0,
+  gate_line: [],
+  gate_line_side: [],
   strict_output: false,
   state_changes_only: false,
   auto_start: false,
@@ -354,6 +358,8 @@ export function ServiceForm({ open, onClose, existing, existingCounter }: Props)
                 </div>
                 <Input label="Channel path" value={form.rtsp_channel} onChange={set('rtsp_channel')}
                   placeholder="Streaming/Channels/102" />
+                <Check label="Low latency mode (reduces buffering delay; keep off if stream is unstable)"
+                  checked={form.rtsp_low_latency} onChange={setBool('rtsp_low_latency')} />
                 <Input label="Frame interval (s)" type="number" step="0.05" min="0.05" max="10"
                   value={form.rtsp_interval} onChange={set('rtsp_interval')} />
                 <div className="bg-[#0f172a] border border-[#1e293b] rounded px-3 py-2">
@@ -412,13 +418,43 @@ export function ServiceForm({ open, onClose, existing, existingCounter }: Props)
                 </div>
 
                 <Section label="Gate trigger" />
-                <Input label="Min bounding box area (px²) — 0 = disabled"
-                  type="number" step="10000" min="0"
-                  value={form.gate_area_threshold} onChange={set('gate_area_threshold')} />
-                <p className="text-xs text-slate-600">
-                  Emit gate_open=true when a car is idle and its bbox area ≥ this value (px²).
-                  Use the Debug CSV to read the 'area' column while the car is stationary.
-                </p>
+                <div>
+                  <p className="text-[10px] font-semibold text-slate-400 mb-1.5">Trigger method</p>
+                  <div className="flex gap-2 flex-wrap">
+                    {(['off', 'area', 'line'] as const).map(m => (
+                      <button key={m} type="button"
+                        onClick={() => setForm(f => ({ ...f, gate_trigger_mode: m }))}
+                        className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                          form.gate_trigger_mode === m
+                            ? 'bg-violet-600 text-white'
+                            : 'bg-[#1e293b] text-slate-400 hover:bg-[#334155]'
+                        }`}>
+                        {m === 'off' ? 'Off' : m === 'area' ? 'Bounding box' : 'Gate line'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {form.gate_trigger_mode === 'area' && (
+                  <>
+                    <Input label="Min bounding box area (px²)"
+                      type="number" step="10000" min="0"
+                      value={form.gate_area_threshold} onChange={set('gate_area_threshold')} />
+                    <p className="text-xs text-slate-600">
+                      Gate opens when car is idle and bbox area ≥ this value.
+                      Use the Debug CSV to read the 'area' column while the car is stationary.
+                    </p>
+                  </>
+                )}
+
+                {form.gate_trigger_mode === 'line' && (
+                  <p className="text-xs text-slate-500 bg-[#0f172a] border border-[#1e293b] rounded px-3 py-2">
+                    Draw the gate line in the <span className="text-violet-400">Preview</span> panel after starting the service.
+                    {form.gate_line?.length === 4
+                      ? ' ✓ Line already configured.'
+                      : ' No line drawn yet.'}
+                  </p>
+                )}
 
                 <Section label="TCP push" />
                 <Check label="Enable TCP push server"

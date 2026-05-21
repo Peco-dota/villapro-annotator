@@ -115,6 +115,23 @@ def _save_dataset_frame(frame_np, service_name: str, dataset_dir: str):
 
 # ── Config dataclass ────────────────────────────────────────────────────────────
 
+def _infer_gate_mode(d: dict) -> str:
+    """Backwards-compat: derive gate_trigger_mode from saved config that may predate the field."""
+    mode = d.get("gate_trigger_mode", "")
+    if mode in ("off", "area", "line", "both"):
+        return mode
+    # Old configs: infer from which values are set
+    has_area = float(d.get("gate_area_threshold", 0.0)) > 0
+    has_line = len(d.get("gate_line", [])) == 4 and len(d.get("gate_line_side", [])) == 2
+    if has_area and has_line:
+        return "both"
+    if has_line:
+        return "line"
+    if has_area:
+        return "area"
+    return "off"
+
+
 @dataclass
 class ServiceConfig:
     name: str
@@ -136,6 +153,7 @@ class ServiceConfig:
     rtsp_port: int = 554
     rtsp_channel: str = "Streaming/Channels/102"
     rtsp_interval: float = 0.25  # seconds between frame grabs (0.25 = 4 fps)
+    rtsp_low_latency: bool = False  # fflags=nobuffer+low_delay; reduces buffering delay at cost of stability
     # Video file source (used when input_mode="video")
     video_path: str = ""
     video_loop: bool = True
@@ -149,9 +167,15 @@ class ServiceConfig:
     # Input recording: save raw stream/video frames to a local video file
     record_stream: bool = False
     record_dir: str = ""
-    # Gate open trigger: emit gate_open=True when car is idle with bbox area >= this value.
-    # Set to 0 to disable.  Typical value: measure the area when the car fills the frame.
+    # Gate trigger mode: "off" | "area" | "line" | "both"
+    gate_trigger_mode: str = "off"
+    # Bounding-box area trigger (used when mode is "area" or "both").
     gate_area_threshold: float = 0.0
+    # Gate line trigger: user draws a line in the preview (used when mode is "line" or "both").
+    # Stored as [x1,y1,x2,y2] normalized 0-1.
+    gate_line: list = field(default_factory=list)
+    # Reference point on the gate side of the line, normalized [rx, ry] 0-1.
+    gate_line_side: list = field(default_factory=list)
     # TCP push: persisted so the server auto-restarts the push socket on startup
     tcp_push_enabled: bool = False
     tcp_push_host: str = "0.0.0.0"
@@ -198,6 +222,7 @@ class ServiceConfig:
             rtsp_port=d.get("rtsp_port", 554),
             rtsp_channel=d.get("rtsp_channel", "Streaming/Channels/102"),
             rtsp_interval=d.get("rtsp_interval", 0.5),
+            rtsp_low_latency=d.get("rtsp_low_latency", False),
             video_path=d.get("video_path", ""),
             video_loop=d.get("video_loop", True),
             conf_threshold=d.get("conf_threshold", 0.5),
@@ -209,7 +234,10 @@ class ServiceConfig:
             dataset_dir=d.get("dataset_dir", ""),
             record_stream=d.get("record_stream", False),
             record_dir=d.get("record_dir", ""),
+            gate_trigger_mode=_infer_gate_mode(d),
             gate_area_threshold=float(d.get("gate_area_threshold", 0.0)),
+            gate_line=list(d.get("gate_line", [])),
+            gate_line_side=list(d.get("gate_line_side", [])),
             tcp_push_enabled=d.get("tcp_push_enabled", False),
             tcp_push_host=d.get("tcp_push_host", "0.0.0.0"),
             tcp_push_port=int(d.get("tcp_push_port", 0)),
@@ -756,6 +784,7 @@ class DetectionService:
         self._record_enabled = bool(cfg.record_stream and mode in ("rtsp", "video"))
         self._record_dir_cfg = cfg.record_dir
         self._close_video_writer()
+        self._stop_event.clear()  # clear before spawning so a stop() during load is not wiped out
 
         def _worker():
             error = self._do_start(cfg)
@@ -763,6 +792,16 @@ class DetectionService:
                 self._state = STATE_ERROR
                 self._error_msg = error
                 self._append_log(LogEntry.from_error(error))
+            elif self._stop_event.is_set():
+                # stop() was called while the model was loading — release resources and stay stopped
+                self._model_holder["model"] = None
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                self._state = STATE_STOPPED
             else:
                 self._state = STATE_RUNNING
             on_done(error)
@@ -834,8 +873,10 @@ class DetectionService:
             return f"Failed to load model: {e}"
 
         import cv2
-        # Force RTSP over TCP (same as ffplay -rtsp_transport tcp)
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+        if cfg.rtsp_low_latency:
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;0"
+        else:
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
         rtsp_url = cfg.rtsp_url
 
         # Test that the stream opens before returning success
@@ -854,8 +895,6 @@ class DetectionService:
             f"http://{cfg.output_host}:{cfg.output_port}/result"
             if cfg.output_host else None
         )
-
-        self._stop_event.clear()
 
         # Shared latest frame between reader and processing threads
         latest: dict = {"frame": None, "ok": False}
@@ -935,7 +974,10 @@ class DetectionService:
                         cfg.state_changes_only,
                         self._dataset_capturing_active, self._dataset_interval_runtime,
                         self._dataset_dir_runtime, self._dataset_frame_count,
-                        cfg.gate_area_threshold,
+                        self._config.gate_trigger_mode,
+                        self._config.gate_area_threshold,
+                        self._config.gate_line,
+                        self._config.gate_line_side,
                     )
                     if frame_summary:
                         self._last_payload = frame_summary
@@ -1006,8 +1048,6 @@ class DetectionService:
             f"http://{cfg.output_host}:{cfg.output_port}/result"
             if cfg.output_host else None
         )
-
-        self._stop_event.clear()
 
         # Shared latest frame between reader and processing threads
         latest: dict = {"frame": None, "ok": False}
@@ -1165,7 +1205,10 @@ class DetectionService:
                         cfg.state_changes_only,
                         self._dataset_capturing_active, self._dataset_interval_runtime,
                         self._dataset_dir_runtime, self._dataset_frame_count,
-                        cfg.gate_area_threshold,
+                        self._config.gate_trigger_mode,
+                        self._config.gate_area_threshold,
+                        self._config.gate_line,
+                        self._config.gate_line_side,
                     )
                     if _vs:
                         self._last_payload = _vs
@@ -1497,7 +1540,10 @@ class DetectionService:
         dataset_interval: int = 10,
         dataset_dir: str = "",
         frame_count: int = 0,
+        gate_trigger_mode: str = "off",
         gate_area_threshold: float = 0.0,
+        gate_line: list = [],
+        gate_line_side: list = [],
     ) -> dict:
         if not results:
             return {}
@@ -1621,6 +1667,7 @@ class DetectionService:
                     "gate_open": False if cls_name == "car" else "",
                 })
 
+            _last = buf_list[-1] if buf_list else (0.0, 0.0, 0.0)
             class_results[cls_name] = {
                 "detected":       detected,
                 "direction":      current_state if current_state is not None else "idle",
@@ -1628,6 +1675,8 @@ class DetectionService:
                 "_current_state": current_state,
                 "_misses":        state["misses"],
                 "_area":          _bbox_area(box) if detected else 0.0,
+                "_cx":            _last[0],
+                "_cy":            _last[1],
             }
 
         # ── Per-object tracking (counting service only) ───────────────────────
@@ -1728,17 +1777,36 @@ class DetectionService:
 
         # ── Gate open detection ───────────────────────────────────────────────
         # Gate opens for incoming cars only (class "car", not "car_rear").
-        # Conditions: car detected, direction confirmed as idle (not still building),
-        # and the bounding box area exceeds the configured threshold (= car is close).
+        # Either trigger fires independently — area threshold OR drawn gate line.
         car_res = class_results["car"]
-        # Gate logic — simple: open when car is idle at the gate (area >= threshold).
-        gate_open = bool(
-            gate_area_threshold > 0
-            and car_res["detected"]
+        car_idle = (
+            car_res["detected"]
             and car_res["_current_state"] is not None
             and car_res["direction"] == "idle"
+        )
+
+        gate_area_open = bool(
+            gate_trigger_mode in ("area", "both")
+            and gate_area_threshold > 0
+            and car_idle
             and car_res["_area"] >= gate_area_threshold
         )
+
+        gate_line_open = False
+        if gate_trigger_mode in ("line", "both") and car_idle and len(gate_line) == 4 and len(gate_line_side) == 2:
+            h, w = frame.shape[:2]
+            if h > 0 and w > 0:
+                cx_n = car_res["_cx"] / w
+                cy_n = car_res["_cy"] / h
+                x1, y1, x2, y2 = gate_line
+                rx, ry = gate_line_side
+                dx, dy = x2 - x1, y2 - y1
+                if dx != 0 or dy != 0:
+                    ref_sign = dx * (ry - y1) - dy * (rx - x1)
+                    car_sign = dx * (cy_n - y1) - dy * (cx_n - x1)
+                    gate_line_open = bool(ref_sign != 0 and (car_sign * ref_sign > 0))
+
+        gate_open = gate_area_open or gate_line_open
 
         payload = {
             "service_name": service_name,
@@ -1889,6 +1957,10 @@ class ServiceRegistry:
                 if c.name == cfg.name:
                     self._configs[i] = cfg
                     self._save()
+                    # Push gate params to the live service so they take effect immediately
+                    svc = self._services.get(cfg.name)
+                    if svc is not None:
+                        svc._config = cfg
                     return
             self._configs.append(cfg)
             self._save()

@@ -135,6 +135,7 @@ export function DetectionPage() {
                   <ServiceCard
                     key={s.name}
                     service={s}
+                    hasCounter={allCounters.some(c => c.name === `${s.name}_counter`)}
                     onEdit={() => openEdit(s)}
                     onDuplicate={() => setDupTarget(s)}
                     onPreview={() => setPreviewService(s)}

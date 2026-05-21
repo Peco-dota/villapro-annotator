@@ -12,7 +12,7 @@ import {
   videoPause, videoSpeed, videoSeek, videoSeekTo, videoStep, videoReverse,
   sseUrl, api,
   startCounter, stopCounter, getCounterStatus, resetCounter,
-  counterSseUrl, clearServiceResults,
+  counterSseUrl, clearServiceResults, updateService,
 } from '../../lib/api'
 import type { ServiceConfig, ServiceStatus, CountingStatus, CountingResult } from '../../lib/types'
 import { Spinner } from '../ui/Spinner'
@@ -20,6 +20,7 @@ import { Button } from '../ui/Button'
 
 interface Props {
   service: ServiceConfig
+  hasCounter: boolean
   onEdit: () => void
   onDuplicate: () => void
   onPreview?: () => void
@@ -460,10 +461,64 @@ function dirLabel(d: string | undefined, conf: number | undefined, detected: boo
   )
 }
 
+type DrawStep = 'off' | 'pt_a' | 'pt_b' | 'side' | 'done'
+
 function InlinePreview({ service, onStop, runKey, counterExists }: { service: ServiceConfig; onStop: () => void; runKey: string; counterExists: boolean }) {
   const isCounter = service.kind === 'counter'
   const mjpegUrl = useMemo(() => getMjpegStreamUrl(service.name), [service.name])
   const isVideo = service.input_mode === 'video'
+  const qc = useQueryClient()
+
+  // ── Gate line drawing ────────────────────────────────────────────────────
+  const imgRef = useRef<HTMLImageElement>(null)
+  const svgRef = useRef<SVGSVGElement>(null)
+  const initLine = service.gate_line?.length === 4 ? service.gate_line : null
+  const initSide = service.gate_line_side?.length === 2 ? service.gate_line_side : null
+  const [drawStep, setDrawStep] = useState<DrawStep>(initLine ? 'done' : 'off')
+  const [ptA,  setPtA]  = useState<[number,number] | null>(initLine ? [initLine[0], initLine[1]] : null)
+  const [ptB,  setPtB]  = useState<[number,number] | null>(initLine ? [initLine[2], initLine[3]] : null)
+  const [side, setSide] = useState<[number,number] | null>(initSide ? [initSide[0], initSide[1]] : null)
+  const [lineSaved, setLineSaved] = useState(false)
+
+  const toSvgPx = useCallback((nx: number, ny: number): [number,number] => {
+    const svg = svgRef.current; const img = imgRef.current
+    if (!svg || !img) return [0,0]
+    const sr = svg.getBoundingClientRect(); const ir = img.getBoundingClientRect()
+    return [ir.left - sr.left + nx * ir.width, ir.top - sr.top + ny * ir.height]
+  }, [])
+
+  const toNorm = useCallback((e: React.MouseEvent<SVGSVGElement>): [number,number] => {
+    const img = imgRef.current; if (!img) return [0,0]
+    const ir = img.getBoundingClientRect()
+    return [
+      Math.max(0, Math.min(1, (e.clientX - ir.left) / ir.width)),
+      Math.max(0, Math.min(1, (e.clientY - ir.top)  / ir.height)),
+    ]
+  }, [])
+
+  const handleSvgClick = useCallback((e: React.MouseEvent<SVGSVGElement>) => {
+    if (drawStep === 'off' || drawStep === 'done') return
+    const pt = toNorm(e)
+    if      (drawStep === 'pt_a') { setPtA(pt); setPtB(null); setSide(null); setDrawStep('pt_b') }
+    else if (drawStep === 'pt_b') { setPtB(pt); setSide(null); setDrawStep('side') }
+    else if (drawStep === 'side') { setSide(pt); setDrawStep('done') }
+  }, [drawStep, toNorm])
+
+  const saveLineMut = useMutation({
+    mutationFn: () => updateService(service.name, {
+      ...service,
+      gate_line:      ptA && ptB ? [ptA[0], ptA[1], ptB[0], ptB[1]] : [],
+      gate_line_side: side ? [side[0], side[1]] : [],
+    }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['services'] }); setLineSaved(true); setTimeout(() => setLineSaved(false), 2000) },
+  })
+
+  const clearLine = () => { setPtA(null); setPtB(null); setSide(null); setDrawStep('off') }
+
+  const svgA    = ptA  ? toSvgPx(ptA[0],  ptA[1])  : null
+  const svgB    = ptB  ? toSvgPx(ptB[0],  ptB[1])  : null
+  const svgSide = side ? toSvgPx(side[0], side[1])  : null
+  const lineCursor = drawStep === 'pt_a' || drawStep === 'pt_b' || drawStep === 'side' ? 'crosshair' : 'default'
 
   const { data: videoState, refetch: refetchVideo } = useQuery({
     queryKey: ['video-state', service.name],
@@ -521,6 +576,35 @@ function InlinePreview({ service, onStop, runKey, counterExists }: { service: Se
               <span className="text-xs text-slate-400 font-medium">Live Preview</span>
             </div>
             <div className="flex items-center gap-3">
+              {/* Gate line controls in header — only when line trigger active */}
+              {service.gate_trigger_mode === 'line' && (
+                <div className="flex items-center gap-2 border-r border-[#1e293b] pr-3">
+                  {drawStep === 'off' && (
+                    <button onClick={() => setDrawStep('pt_a')}
+                      className="flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-medium hover:bg-amber-500/30 cursor-pointer transition-colors">
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                      Draw gate line
+                    </button>
+                  )}
+                  {drawStep === 'done' && (
+                    <>
+                      <span className="text-[11px] text-amber-400 font-medium">✓ Line set</span>
+                      <button onClick={() => setDrawStep('pt_a')} className="text-[11px] text-slate-400 hover:text-amber-300 cursor-pointer transition-colors">Edit</button>
+                      <button onClick={clearLine} className="text-[11px] text-slate-500 hover:text-red-400 cursor-pointer transition-colors">Clear</button>
+                      <button onClick={() => saveLineMut.mutate()} disabled={saveLineMut.isPending || !side}
+                        className="px-2 py-0.5 rounded bg-blue-600 text-white text-[11px] font-medium hover:bg-blue-500 disabled:opacity-40 cursor-pointer transition-colors">
+                        {lineSaved ? '✓ Saved' : 'Save'}
+                      </button>
+                    </>
+                  )}
+                  {(drawStep === 'pt_a' || drawStep === 'pt_b' || drawStep === 'side') && (
+                    <button onClick={() => { setDrawStep(initLine ? 'done' : 'off'); setPtA(initLine ? [initLine[0],initLine[1]] : null); setPtB(initLine ? [initLine[2],initLine[3]] : null); setSide(initSide ? [initSide[0],initSide[1]] : null) }}
+                      className="text-[11px] text-slate-400 hover:text-red-400 cursor-pointer transition-colors">
+                      ✕ Cancel
+                    </button>
+                  )}
+                </div>
+              )}
               <button
                 onClick={() => window.open(`/preview?service=${encodeURIComponent(service.name)}&mode=${service.input_mode}&kind=${service.kind ?? 'detection'}${!isCounter && counterExists ? '&counter=true' : ''}`, '_blank')}
                 className="text-xs text-slate-600 hover:text-violet-400 cursor-pointer transition-colors flex items-center gap-1"
@@ -539,9 +623,28 @@ function InlinePreview({ service, onStop, runKey, counterExists }: { service: Se
             </div>
           </div>
 
+          {/* Drawing instruction banner — shown during active draw steps */}
+          {(drawStep === 'pt_a' || drawStep === 'pt_b' || drawStep === 'side') && (
+            <div className="px-3 py-2 bg-amber-500/10 border-b border-amber-500/30 flex items-center gap-2">
+              <span className="text-amber-300 text-xs font-medium">
+                {drawStep === 'pt_a' ? '1/3 — Click the line start point on the video' :
+                 drawStep === 'pt_b' ? '2/3 — Click the line end point' :
+                                      '3/3 — Click anywhere on the gate side (where the car should stop)'}
+              </span>
+            </div>
+          )}
+
           {/* Frame — MJPEG stream */}
-          <div className="flex-1 min-h-0 bg-black flex items-center justify-center overflow-hidden">
-            <img src={mjpegUrl} alt="preview" className="max-w-full max-h-full object-contain" />
+          <div className="flex-1 min-h-0 bg-black flex items-center justify-center overflow-hidden relative">
+            <img ref={imgRef} src={mjpegUrl} alt="preview" className="max-w-full max-h-full object-contain" />
+            <svg ref={svgRef} className="absolute inset-0 w-full h-full"
+              style={{ cursor: lineCursor, pointerEvents: drawStep !== 'off' && drawStep !== 'done' ? 'auto' : 'none' }}
+              onClick={handleSvgClick}>
+              {svgA && svgB && <line x1={svgA[0]} y1={svgA[1]} x2={svgB[0]} y2={svgB[1]} stroke="#facc15" strokeWidth={2.5} strokeDasharray="6 3" />}
+              {svgA && <circle cx={svgA[0]} cy={svgA[1]} r={5} fill="#facc15" />}
+              {svgB && <circle cx={svgB[0]} cy={svgB[1]} r={5} fill="#facc15" />}
+              {svgSide && <><circle cx={svgSide[0]} cy={svgSide[1]} r={9} fill="#22c55e" fillOpacity={0.8} /><text x={svgSide[0]} y={svgSide[1]+4} textAnchor="middle" fontSize={9} fill="white" fontWeight="bold">G</text></>}
+            </svg>
           </div>
 
           {/* Video controls */}
@@ -694,7 +797,7 @@ function InlinePreview({ service, onStop, runKey, counterExists }: { service: Se
 
 // ── Main ServiceCard ──────────────────────────────────────────────────────────
 
-export function ServiceCard({ service, onEdit, onDuplicate, onPreview }: Props) {
+export function ServiceCard({ service, hasCounter, onEdit, onDuplicate, onPreview }: Props) {
   const qc = useQueryClient()
   const [showLog, setShowLog] = useState(false)
   const [moreOpen, setMoreOpen] = useState(false)
@@ -722,8 +825,8 @@ export function ServiceCard({ service, onEdit, onDuplicate, onPreview }: Props) 
   const { data: counterStatus } = useQuery<CountingStatus>({
     queryKey: ['counter-status', counterName],
     queryFn: () => getCounterStatus(counterName),
+    enabled: hasCounter,
     refetchInterval: 2000,
-    retry: (_, err: unknown) => (err as { response?: { status?: number } }).response?.status !== 404,
   })
   const counterExists  = counterStatus !== undefined
   const counterRunning = counterStatus?.state === 'running'

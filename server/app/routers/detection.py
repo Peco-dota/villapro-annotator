@@ -114,6 +114,7 @@ class ServiceConfigIn(BaseModel):
     rtsp_ip: str = ""
     rtsp_port: int = 554
     rtsp_channel: str = "Streaming/Channels/102"
+    rtsp_low_latency: bool = False
     rtsp_interval: float = 0.25
     video_path: str = ""
     video_loop: bool = True
@@ -125,7 +126,10 @@ class ServiceConfigIn(BaseModel):
     dataset_dir: str = ""
     record_stream: bool = False
     record_dir: str = ""
+    gate_trigger_mode: str = "off"
     gate_area_threshold: float = 0.0
+    gate_line: list[float] = []
+    gate_line_side: list[float] = []
     # TCP push settings
     tcp_push_enabled: bool = False
     tcp_push_host: str = "0.0.0.0"
@@ -181,6 +185,7 @@ def create_or_update_service(req: ServiceConfigIn, _user: dict = Depends(require
         rtsp_ip=req.rtsp_ip,
         rtsp_port=req.rtsp_port,
         rtsp_channel=req.rtsp_channel,
+        rtsp_low_latency=req.rtsp_low_latency,
         rtsp_interval=req.rtsp_interval,
         video_path=req.video_path,
         video_loop=req.video_loop,
@@ -192,7 +197,10 @@ def create_or_update_service(req: ServiceConfigIn, _user: dict = Depends(require
         dataset_dir=req.dataset_dir,
         record_stream=req.record_stream,
         record_dir=req.record_dir,
+        gate_trigger_mode=req.gate_trigger_mode,
         gate_area_threshold=req.gate_area_threshold,
+        gate_line=list(req.gate_line),
+        gate_line_side=list(req.gate_line_side),
         tcp_push_enabled=req.tcp_push_enabled,
         tcp_push_host=req.tcp_push_host,
         tcp_push_port=req.tcp_push_port,
