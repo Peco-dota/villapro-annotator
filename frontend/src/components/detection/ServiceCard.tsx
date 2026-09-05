@@ -101,10 +101,30 @@ const DIR_COLOR: Record<string, string> = {
 function sourceLabel(s: ServiceConfig): string {
   if (s.input_mode === 'rtsp') {
     const user = s.rtsp_user ? `${s.rtsp_user}:***@` : ''
-    return `📷 rtsp://${user}${s.rtsp_ip}:${s.rtsp_port}/${s.rtsp_channel}`
+    return `rtsp://${user}${s.rtsp_ip}:${s.rtsp_port}/${s.rtsp_channel}`
   }
-  if (s.input_mode === 'video') return `🎬 ${s.video_path?.split('/').pop() ?? s.video_path}${s.video_loop ? ' ↻' : ''}`
+  if (s.input_mode === 'video') return `${s.video_path?.split('/').pop() ?? s.video_path}${s.video_loop ? ' ↻' : ''}`
+  if (s.input_mode === 'udp_stream') return `UDP stream :${s.udp_port}`
+  if (s.input_mode === 'udp_packet') return `UDP packet :${s.udp_port}`
+  if (s.input_mode === 'http') return `http :${s.input_port}`
   return `:${s.input_port}`
+}
+
+const SOURCE_BADGE: Record<string, { label: string; className: string }> = {
+  rtsp:       { label: 'RTSP',   className: 'bg-blue-900/50 border-blue-700/50 text-blue-300' },
+  video:      { label: 'VIDEO',  className: 'bg-violet-900/50 border-violet-700/50 text-violet-300' },
+  http:       { label: 'HTTP',   className: 'bg-green-900/50 border-green-700/50 text-green-300' },
+  udp_stream: { label: 'UDP',    className: 'bg-orange-900/50 border-orange-700/50 text-orange-300' },
+  udp_packet: { label: 'UDP',    className: 'bg-orange-900/50 border-orange-700/50 text-orange-300' },
+}
+
+function SourceBadge({ mode }: { mode: string }) {
+  const b = SOURCE_BADGE[mode] ?? { label: mode.toUpperCase(), className: 'bg-slate-800 border-slate-600 text-slate-400' }
+  return (
+    <span className={`text-[10px] px-1.5 py-0.5 rounded border font-mono font-bold shrink-0 ${b.className}`}>
+      {b.label}
+    </span>
+  )
 }
 
 // ── Live receiver results hook ────────────────────────────────────────────────
@@ -115,6 +135,8 @@ interface DetectionPayload {
   car_rear?: { detected: boolean; direction: string; confidence: number }
   gate?: { open: boolean }
   timestamp?: string
+  cars?:      Array<{ rank: number; detected: boolean; direction: string; confidence: number; area: number }>
+  cars_rear?: Array<{ rank: number; detected: boolean; direction: string; confidence: number; area: number }>
 }
 
 interface ServiceResults {
@@ -828,7 +850,7 @@ export function ServiceCard({ service, hasCounter, onEdit, onDuplicate, onPrevie
     enabled: hasCounter,
     refetchInterval: 2000,
   })
-  const counterExists  = counterStatus !== undefined
+  const counterExists  = hasCounter && counterStatus !== undefined
   const counterRunning = counterStatus?.state === 'running'
   const invCounter = () => qc.invalidateQueries({ queryKey: ['counter-status', counterName] })
 
@@ -910,7 +932,7 @@ export function ServiceCard({ service, hasCounter, onEdit, onDuplicate, onPrevie
   const isPrev = status?.is_previewing ?? false
   const isTcp  = status?.tcp_push_running ?? false
 
-  const isRtspOrVideo = service.input_mode === 'rtsp' || service.input_mode === 'video'
+  const isRtspOrVideo = ['rtsp', 'video', 'http', 'udp_stream', 'udp_packet'].includes(service.input_mode)
 
   const statusText  = loading ? `${spinner} Loading` : running ? 'Running' : hasError ? 'Error' : 'Stopped'
   const statusColor = running ? 'text-green-400' : loading ? 'text-yellow-400' : hasError ? 'text-red-400' : 'text-slate-500'
@@ -944,6 +966,7 @@ export function ServiceCard({ service, hasCounter, onEdit, onDuplicate, onPrevie
                 ? <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-teal-900/60 border border-teal-700/50 text-teal-300 shrink-0">Detection + Counter</span>
                 : <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800 text-slate-500 shrink-0">Detection</span>
             }
+            <SourceBadge mode={service.input_mode} />
           </div>
           <div className="flex-1 min-w-0 flex items-center gap-1 text-xs text-slate-500 truncate font-mono">
             <span className="truncate">{sourceLabel(service)}</span>

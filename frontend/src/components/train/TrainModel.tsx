@@ -271,6 +271,7 @@ export function TrainModel() {
   const [jobId, setJobId] = useState<string | null>(() => {
     try { return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null') } catch { return null }
   })
+  const dismissedJobRef = useRef<string | null>(null)
   const [logs, setLogs] = useState<string[]>([])
   const [logDone, setLogDone] = useState(false)
   const [logOpen, setLogOpen] = useState(false)
@@ -327,7 +328,7 @@ export function TrainModel() {
 
   // If server has an active job but we lost our local jobId (page refresh), re-attach
   useEffect(() => {
-    if (!jobId && activeData?.active && activeData.job_id) {
+    if (!jobId && activeData?.active && activeData.job_id && activeData.job_id !== dismissedJobRef.current) {
       setJobId(activeData.job_id)
       localStorage.setItem(STORAGE_KEY, JSON.stringify(activeData.job_id))
     }
@@ -394,6 +395,7 @@ export function TrainModel() {
   })
 
   const reset = () => {
+    if (jobId) dismissedJobRef.current = jobId
     esRef.current?.close()
     setJobId(null)
     setLogs([])

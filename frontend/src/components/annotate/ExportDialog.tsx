@@ -443,40 +443,79 @@ export function ExportDialog({ open, onClose, projectPath }: Props) {
         )}
 
         {/* ── Running / Done ── */}
-        {step === 'running' && (
-          <div className="flex flex-col gap-3">
-            <div className={`flex items-center gap-3 text-sm px-3 py-2.5 rounded
-              ${job?.status === 'done' ? 'bg-green-900/20 text-green-300' : job?.status === 'failed' ? 'bg-red-900/20 text-red-300' : 'bg-slate-800 text-slate-300'}`}>
-              {job?.status === 'running' || !job ? <Spinner size={14} /> : job.status === 'done' ? '✓' : '✗'}
-              <span>
-                {!job ? 'Starting…' :
-                 job.status === 'running' ? (doAugment ? 'Exporting and augmenting…' : 'Exporting…') :
-                 job.status === 'done' ? (() => {
-                   const r = job.result as { images?: number; augmented?: number; annotations?: number }
-                   const parts = [`${r?.images ?? 0} images`]
-                   if (doAugment) parts.push(`${r?.augmented ?? 0} augmented`)
-                   parts.push(`${r?.annotations ?? 0} annotations`)
-                   return `Done — ${parts.join(', ')}`
-                 })() :
-                 `Failed: ${job.error}`}
-              </span>
-            </div>
+        {step === 'running' && (() => {
+          const isRunning = !job || job.status === 'running'
+          const isFailed  = job?.status === 'failed'
+          const hasProgress = job?.total != null && job.total > 0
+          const pct = hasProgress ? Math.round(((job!.progress ?? 0) / job!.total!) * 100) : null
 
-            {allDone && (
-              <p className="text-xs text-slate-400 text-center">
-                Dataset saved to <span className="font-mono text-slate-300">{effectiveOutputDir}</span>
-              </p>
-            )}
+          return (
+            <div className="flex flex-col gap-4">
+              {/* Status label */}
+              <div className="flex items-center gap-2.5 text-sm">
+                {isRunning
+                  ? <Spinner size={14} />
+                  : isFailed
+                    ? <span className="text-red-400">✗</span>
+                    : <span className="text-green-400">✓</span>
+                }
+                <span className={isFailed ? 'text-red-300' : allDone ? 'text-green-300' : 'text-slate-300'}>
+                  {!job
+                    ? 'Starting…'
+                    : isRunning
+                      ? (doAugment ? 'Exporting and augmenting…' : 'Exporting…')
+                      : allDone
+                        ? (() => {
+                            const r = job.result as { images?: number; augmented?: number; annotations?: number }
+                            const parts = [`${r?.images ?? 0} images`]
+                            if (doAugment) parts.push(`${r?.augmented ?? 0} augmented`)
+                            parts.push(`${r?.annotations ?? 0} annotations`)
+                            return `Done — ${parts.join(', ')}`
+                          })()
+                        : `Failed: ${job.error}`}
+                </span>
+                {pct !== null && isRunning && (
+                  <span className="ml-auto text-xs text-violet-400 font-mono shrink-0">{pct}%</span>
+                )}
+              </div>
 
-            <div className="flex gap-2 justify-end pt-1">
-              {allDone ? (
-                <Button variant="primary" onClick={() => { reset(); onClose() }}>Done</Button>
-              ) : (
-                <Button variant="ghost" disabled>Please wait…</Button>
+              {/* Progress bar */}
+              <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
+                {hasProgress && pct !== null ? (
+                  <div
+                    className={`h-full rounded-full transition-all duration-300 ${allDone ? 'bg-green-500' : isFailed ? 'bg-red-500' : 'bg-violet-500'}`}
+                    style={{ width: `${allDone ? 100 : pct}%` }}
+                  />
+                ) : (
+                  <div className={`h-full rounded-full ${allDone ? 'bg-green-500 w-full' : isFailed ? 'bg-red-500 w-full' : 'bg-violet-500 w-1/3 animate-[slide_1.4s_ease-in-out_infinite]'}`} />
+                )}
+              </div>
+
+              {/* Progress count */}
+              {hasProgress && isRunning && (
+                <p className="text-xs text-slate-500 -mt-2">
+                  {job!.progress ?? 0} / {job!.total} images
+                </p>
               )}
+
+              {allDone && (
+                <p className="text-xs text-slate-400">
+                  Saved to <span className="font-mono text-slate-300">{effectiveOutputDir}</span>
+                </p>
+              )}
+
+              <div className="flex gap-2 justify-end">
+                {allDone ? (
+                  <Button variant="primary" onClick={() => { reset(); onClose() }}>Done</Button>
+                ) : isFailed ? (
+                  <Button variant="ghost" onClick={reset}>Try again</Button>
+                ) : (
+                  <Button variant="ghost" disabled>Please wait…</Button>
+                )}
+              </div>
             </div>
-          </div>
-        )}
+          )
+        })()}
 
       </div>
     </Modal>

@@ -40,7 +40,8 @@ export const changePassword = (current_password: string, new_password: string) =
 // ── System ────────────────────────────────────────────────────────────────────
 export const getSystemInfo = () => api.get('/api/system/info').then(r => r.data)
 export const getTokens = () => api.get('/api/system/tokens').then(r => r.data)
-export const createToken = (label: string) => api.post('/api/system/tokens', { label }).then(r => r.data)
+export const createToken = (label: string, services: string[] = [], permissions: string[] = ['stream', 'results']) =>
+  api.post('/api/system/tokens', { label, services, permissions }).then(r => r.data)
 export const revokeToken = (token: string) => api.delete(`/api/system/tokens/${token}`).then(r => r.data)
 export const getSettings = () => api.get('/api/system/settings').then(r => r.data)
 export const patchSettings = (data: Record<string, unknown>) => api.patch('/api/system/settings', data).then(r => r.data)
@@ -174,6 +175,7 @@ export const stopCounter = (name: string) => api.post(`/api/counting/services/${
 export const getCounterStatus = (name: string) => api.get(`/api/counting/services/${name}/status`).then(r => r.data)
 export const resetCounter = (name: string) => api.post(`/api/counting/services/${name}/reset`).then(r => r.data)
 export const counterSseUrl = (name: string): string => sseUrl(`/api/counting/services/${name}/stream`)
+export const getNdjsonStreamUrl = (name: string): string => sseUrl(`/api/detection/services/${name}/stream/ndjson`)
 
 // ── Filesystem ───────────────────────────────────────────────────────────────
 export type FsFilter = 'any' | 'project' | 'images_dir' | 'model' | 'video' | 'yaml' | 'dir' | '*'

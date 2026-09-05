@@ -1,7 +1,7 @@
 """System / config API endpoints."""
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field
+from typing import List, Optional
 
 from app.auth import require_user, require_admin
 from app.config import get_config
@@ -24,21 +24,37 @@ def get_info(_user: dict = Depends(require_user)):
 
 class TokenCreateRequest(BaseModel):
     label: str
+    services: List[str] = Field(default_factory=list)
+    permissions: List[str] = Field(default_factory=lambda: ["stream", "results"])
 
 
 @router.get("/tokens")
 def list_tokens(_user: dict = Depends(require_admin)):
     cfg = get_config()
-    return [{"label": t["label"], "token": t["token"], "created_at": t.get("created_at", "")}
-            for t in cfg.get_tokens()]
+    return [
+        {
+            "label": t["label"],
+            "token": t["token"],
+            "created_at": t.get("created_at", ""),
+            "services": t.get("services", []),
+            "permissions": t.get("permissions", ["stream", "results", "control"]),
+        }
+        for t in cfg.get_tokens()
+    ]
 
 
 @router.post("/tokens", status_code=201)
 def create_token(req: TokenCreateRequest, _user: dict = Depends(require_admin)):
     cfg = get_config()
-    token = cfg.create_token(req.label)
+    token = cfg.create_token(req.label, services=req.services, permissions=req.permissions)
     from datetime import datetime, timezone
-    return {"label": req.label, "token": token, "created_at": datetime.now(timezone.utc).isoformat()}
+    return {
+        "label": req.label,
+        "token": token,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "services": req.services,
+        "permissions": req.permissions,
+    }
 
 
 @router.delete("/tokens/{token_value}")

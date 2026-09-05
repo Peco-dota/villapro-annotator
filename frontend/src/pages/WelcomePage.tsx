@@ -352,10 +352,8 @@ function NavTile({
         {icon}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <p className={`font-semibold text-sm ${active ? 'text-violet-200' : 'text-slate-100'}`}>{label}</p>
-          {badge}
-        </div>
+        <p className={`font-semibold text-sm ${active ? 'text-violet-200' : 'text-slate-100'}`}>{label}</p>
+        {badge && <div className="mt-1">{badge}</div>}
         <p className="text-xs text-slate-500 mt-0.5">{description}</p>
       </div>
     </button>
@@ -455,6 +453,11 @@ export function WelcomePage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['merge-active'] }),
   })
 
+  const [dismissedJobs, setDismissedJobs] = useState<Set<string>>(new Set())
+  const dismissJob = (id: string | undefined) => { if (id) setDismissedJobs(prev => new Set([...prev, id])) }
+  const augDismissed  = augActive?.job_id   && dismissedJobs.has(augActive.job_id)
+  const trainDismissed = trainActive?.job_id && dismissedJobs.has(trainActive.job_id)
+
   const logout = () => { clearToken(); nav('/login') }
 
   return (
@@ -471,6 +474,35 @@ export function WelcomePage() {
           <span className="text-base font-semibold text-slate-100">VisionQ</span>
           {info && <span className="text-xs text-slate-600">v{info.version}</span>}
         </div>
+
+        {/* ── Activity pills ── */}
+        <div className="flex items-center gap-1.5">
+          {runningCount > 0 && (
+            <span className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-green-900/30 border border-green-700/40 text-green-300">
+              <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse shrink-0" />
+              {runningCount} service{runningCount !== 1 ? 's' : ''} running
+            </span>
+          )}
+          {trainActive?.status === 'running' && (
+            <span className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-violet-900/30 border border-violet-700/40 text-violet-300">
+              <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse shrink-0" />
+              Training
+            </span>
+          )}
+          {mergeActive?.status === 'running' && (
+            <span className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-blue-900/30 border border-blue-700/40 text-blue-300">
+              <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse shrink-0" />
+              Merging
+            </span>
+          )}
+          {augActive?.status === 'running' && (
+            <span className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-amber-900/30 border border-amber-700/40 text-amber-300">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+              Augmenting
+            </span>
+          )}
+        </div>
+
         <div className="flex items-center gap-2">
           <span className="text-xs text-slate-500">{user?.username}</span>
           <Button variant="ghost" size="sm" onClick={() => nav('/settings')}>Settings</Button>
@@ -508,14 +540,14 @@ export function WelcomePage() {
                 </span>
               ) : mergeActive.status === 'done' ? (
                 <span
-                  className="flex items-center gap-1 text-[10px] font-bold text-green-300 bg-green-900/40 border border-green-500/30 px-1.5 py-0.5 rounded-full cursor-pointer hover:bg-green-900/70"
+                  className="flex items-center gap-1 text-[10px] font-bold text-green-300 bg-green-900/40 border border-green-500/30 px-1.5 py-0.5 rounded-full cursor-pointer hover:bg-green-900/70 whitespace-nowrap"
                   onClick={e => { e.stopPropagation(); dismissMergeMut.mutate() }}
                 >
                   ✓ DONE ×
                 </span>
               ) : mergeActive.status === 'failed' ? (
                 <span
-                  className="flex items-center gap-1 text-[10px] font-bold text-red-300 bg-red-900/40 border border-red-500/30 px-1.5 py-0.5 rounded-full cursor-pointer hover:bg-red-900/70"
+                  className="flex items-center gap-1 text-[10px] font-bold text-red-300 bg-red-900/40 border border-red-500/30 px-1.5 py-0.5 rounded-full cursor-pointer hover:bg-red-900/70 whitespace-nowrap"
                   onClick={e => { e.stopPropagation(); dismissMergeMut.mutate() }}
                 >
                   ✗ {mergeActive.error === 'Cancelled' ? 'CANCELLED' : 'FAILED'} ×
@@ -533,19 +565,21 @@ export function WelcomePage() {
             }
             onClick={() => setActiveSection('augment')}
             active={activeSection === 'augment'}
-            badge={augActive?.active ? (
+            badge={augActive?.active && !augDismissed ? (
               augActive.status === 'running' ? (
-                <span className="flex items-center gap-1 text-[10px] font-bold text-teal-300 bg-teal-900/40 border border-teal-500/30 px-1.5 py-0.5 rounded-full">
+                <span className="flex items-center gap-1 text-[10px] font-bold text-teal-300 bg-teal-900/40 border border-teal-500/30 px-1.5 py-0.5 rounded-full whitespace-nowrap">
                   <span className="w-1.5 h-1.5 rounded-full bg-teal-400 animate-pulse inline-block" />
                   AUGMENTING
                 </span>
               ) : augActive.status === 'done' ? (
-                <span className="flex items-center gap-1 text-[10px] font-bold text-green-300 bg-green-900/40 border border-green-500/30 px-1.5 py-0.5 rounded-full">
-                  ✓ DONE
+                <span onClick={e => { e.stopPropagation(); dismissJob(augActive.job_id) }}
+                  className="flex items-center gap-1 text-[10px] font-bold text-green-300 bg-green-900/40 border border-green-500/30 px-1.5 py-0.5 rounded-full cursor-pointer hover:bg-green-900/70 whitespace-nowrap">
+                  ✓ DONE ×
                 </span>
               ) : augActive.status === 'failed' ? (
-                <span className="flex items-center gap-1 text-[10px] font-bold text-red-300 bg-red-900/40 border border-red-500/30 px-1.5 py-0.5 rounded-full">
-                  ✗ {augActive.error === 'Cancelled' ? 'CANCELLED' : 'FAILED'}
+                <span onClick={e => { e.stopPropagation(); dismissJob(augActive.job_id) }}
+                  className="flex items-center gap-1 text-[10px] font-bold text-red-300 bg-red-900/40 border border-red-500/30 px-1.5 py-0.5 rounded-full cursor-pointer hover:bg-red-900/70 whitespace-nowrap">
+                  ✗ {augActive.error === 'Cancelled' ? 'CANCELLED' : 'FAILED'} ×
                 </span>
               ) : undefined
             ) : undefined}
@@ -566,19 +600,21 @@ export function WelcomePage() {
             }
             onClick={() => setActiveSection('train')}
             active={activeSection === 'train'}
-            badge={trainActive?.active ? (
+            badge={trainActive?.active && !trainDismissed ? (
               trainActive.status === 'running' ? (
-                <span className="flex items-center gap-1 text-[10px] font-bold text-violet-300 bg-violet-900/40 border border-violet-500/30 px-1.5 py-0.5 rounded-full">
+                <span className="flex items-center gap-1 text-[10px] font-bold text-violet-300 bg-violet-900/40 border border-violet-500/30 px-1.5 py-0.5 rounded-full whitespace-nowrap">
                   <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse inline-block" />
                   TRAINING
                 </span>
               ) : trainActive.status === 'done' ? (
-                <span className="flex items-center gap-1 text-[10px] font-bold text-green-300 bg-green-900/40 border border-green-500/30 px-1.5 py-0.5 rounded-full">
-                  ✓ DONE
+                <span onClick={e => { e.stopPropagation(); dismissJob(trainActive.job_id) }}
+                  className="flex items-center gap-1 text-[10px] font-bold text-green-300 bg-green-900/40 border border-green-500/30 px-1.5 py-0.5 rounded-full cursor-pointer hover:bg-green-900/70 whitespace-nowrap">
+                  ✓ DONE ×
                 </span>
               ) : trainActive.status === 'failed' ? (
-                <span className="flex items-center gap-1 text-[10px] font-bold text-red-300 bg-red-900/40 border border-red-500/30 px-1.5 py-0.5 rounded-full">
-                  ✗ {(trainActive.error?.includes('Cancelled') || trainActive.error?.includes('Force-stopped')) ? 'CANCELLED' : 'FAILED'}
+                <span onClick={e => { e.stopPropagation(); dismissJob(trainActive.job_id) }}
+                  className="flex items-center gap-1 text-[10px] font-bold text-red-300 bg-red-900/40 border border-red-500/30 px-1.5 py-0.5 rounded-full cursor-pointer hover:bg-red-900/70 whitespace-nowrap">
+                  ✗ {(trainActive.error?.includes('Cancelled') || trainActive.error?.includes('Force-stopped')) ? 'CANCELLED' : 'FAILED'} ×
                 </span>
               ) : undefined
             ) : undefined}

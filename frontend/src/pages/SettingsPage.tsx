@@ -3,13 +3,22 @@ import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   getSystemInfo, getSettings, patchSettings, changePassword,
-  getTokens, createToken, revokeToken,
+  getTokens, createToken, revokeToken, getServices,
 } from '../lib/api'
 import { clearToken, getUser } from '../lib/auth'
 import { Button } from '../components/ui/Button'
 import { Input } from '../components/ui/Input'
 import { Spinner } from '../components/ui/Spinner'
 import type { Token } from '../lib/types'
+
+const ALL_PERMISSIONS = ['stream', 'results', 'control'] as const
+type Permission = typeof ALL_PERMISSIONS[number]
+
+const PERMISSION_LABELS: Record<Permission, string> = {
+  stream: 'Stream (SSE / MJPEG preview)',
+  results: 'Results (status, last payload, log)',
+  control: 'Control (start / stop / restart)',
+}
 
 // ── Section wrapper ───────────────────────────────────────────────────────────
 
@@ -49,7 +58,7 @@ function ChangePasswordSection() {
 
   return (
     <Section title="Change Password" icon="🔑">
-      <div className="flex flex-col gap-3 max-w-sm">
+      <div className="flex flex-col gap-3">
         <Input
           label="Current password"
           type="password"
@@ -115,7 +124,7 @@ function ServerSettingsSection() {
 
   return (
     <Section title="Server Settings" icon="⚙">
-      <div className="flex flex-col gap-3 max-w-sm">
+      <div className="flex flex-col gap-3">
         <Input label="Host" defaultValue={settings?.host} onChange={set('host')} />
         <Input label="Port" type="number" defaultValue={settings?.port} onChange={set('port')} />
         <Input label="SSL cert file" defaultValue={settings?.ssl_certfile ?? ''} onChange={set('ssl_certfile')} placeholder="(optional)" />
@@ -141,6 +150,8 @@ function ServerSettingsSection() {
 function ApiTokensSection() {
   const qc = useQueryClient()
   const [label, setLabel] = useState('')
+  const [selectedServices, setSelectedServices] = useState<string[]>([])
+  const [selectedPerms, setSelectedPerms] = useState<Permission[]>(['stream', 'results'])
   const [newToken, setNewToken] = useState<string | null>(null)
 
   const { data: tokens = [], isLoading } = useQuery<Token[]>({
@@ -148,15 +159,33 @@ function ApiTokensSection() {
     queryFn: getTokens,
   })
 
+  const { data: services = [] } = useQuery({
+    queryKey: ['services'],
+    queryFn: getServices,
+  })
+  const serviceNames: string[] = (services as Array<{ name: string }>).map(s => s.name)
+
   const createMut = useMutation({
-    mutationFn: () => createToken(label),
-    onSuccess: (data) => { setNewToken(data.token); setLabel(''); qc.invalidateQueries({ queryKey: ['tokens'] }) },
+    mutationFn: () => createToken(label, selectedServices, selectedPerms),
+    onSuccess: (data) => {
+      setNewToken(data.token)
+      setLabel('')
+      setSelectedServices([])
+      setSelectedPerms(['stream', 'results'])
+      qc.invalidateQueries({ queryKey: ['tokens'] })
+    },
   })
 
   const revokeMut = useMutation({
     mutationFn: (t: string) => revokeToken(t),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['tokens'] }),
   })
+
+  const toggleService = (name: string) =>
+    setSelectedServices(prev => prev.includes(name) ? prev.filter(s => s !== name) : [...prev, name])
+
+  const togglePerm = (p: Permission) =>
+    setSelectedPerms(prev => prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p])
 
   return (
     <Section title="API Tokens" icon="🔐">
@@ -167,29 +196,82 @@ function ApiTokensSection() {
           <button onClick={() => setNewToken(null)} className="block text-xs text-slate-500 mt-2 cursor-pointer hover:text-slate-300">Dismiss</button>
         </div>
       )}
-      <div className="flex gap-2 mb-4 max-w-sm">
+
+      {/* Create form */}
+      <div className="flex flex-col gap-3 mb-5 max-w-sm">
         <Input
-          className="flex-1"
-          placeholder="Token label (e.g. frontend-prod)"
+          placeholder="Token label (e.g. gate-controller)"
           value={label}
           onChange={e => setLabel(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && label.trim()) createMut.mutate() }}
         />
-        <Button variant="primary" onClick={() => createMut.mutate()} disabled={createMut.isPending || !label.trim()}>
+
+        {/* Permissions */}
+        <div>
+          <p className="text-xs text-slate-500 mb-1.5">Permissions</p>
+          <div className="flex flex-col gap-1">
+            {ALL_PERMISSIONS.map(p => (
+              <label key={p} className="flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={selectedPerms.includes(p)}
+                  onChange={() => togglePerm(p)}
+                  className="accent-violet-500"
+                />
+                <span className="text-xs text-slate-300">{PERMISSION_LABELS[p]}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {/* Service scope */}
+        {serviceNames.length > 0 && (
+          <div>
+            <p className="text-xs text-slate-500 mb-1.5">
+              Allowed services <span className="text-slate-600">(leave all unchecked = access all)</span>
+            </p>
+            <div className="flex flex-col gap-1 max-h-32 overflow-y-auto">
+              {serviceNames.map(name => (
+                <label key={name} className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={selectedServices.includes(name)}
+                    onChange={() => toggleService(name)}
+                    className="accent-violet-500"
+                  />
+                  <span className="text-xs text-slate-300 font-mono">{name}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <Button variant="primary" className="self-start" onClick={() => createMut.mutate()} disabled={createMut.isPending || !label.trim()}>
           {createMut.isPending ? <Spinner size={12} /> : null}
-          Create
+          Create Token
         </Button>
       </div>
 
+      {/* Token list */}
       {isLoading ? <Spinner /> : tokens.length === 0 ? (
         <p className="text-xs text-slate-600">No tokens yet</p>
       ) : (
         <div className="flex flex-col gap-2">
           {tokens.map(t => (
-            <div key={t.token} className="flex items-center justify-between gap-3 px-4 py-2.5 bg-[#0f172a] border border-[#1e293b] rounded-lg">
-              <div>
+            <div key={t.token} className="flex items-start justify-between gap-3 px-4 py-3 bg-[#0f172a] border border-[#1e293b] rounded-lg">
+              <div className="min-w-0">
                 <p className="text-sm text-slate-200">{t.label}</p>
                 <p className="text-xs text-slate-600 mt-0.5">{new Date(t.created_at).toLocaleString()}</p>
+                <div className="flex flex-wrap gap-1 mt-1.5">
+                  {(t.permissions ?? []).map(p => (
+                    <span key={p} className="px-1.5 py-0.5 rounded text-[10px] bg-violet-900/40 text-violet-300 border border-violet-700/40">{p}</span>
+                  ))}
+                  {(t.services ?? []).length > 0
+                    ? (t.services ?? []).map(s => (
+                        <span key={s} className="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-400 border border-slate-700">{s}</span>
+                      ))
+                    : <span className="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-500 border border-slate-700">all services</span>
+                  }
+                </div>
               </div>
               <Button
                 variant="danger"
@@ -263,8 +345,8 @@ export function SettingsPage() {
         </aside>
 
         {/* Content */}
-        <main className="flex-1 overflow-y-auto p-6">
-          <div className="max-w-xl flex flex-col gap-5">
+        <main className="flex-1 overflow-y-auto p-8">
+          <div className="max-w-2xl mx-auto flex flex-col gap-6">
             <div id="account"><ChangePasswordSection /></div>
             <div id="server"><ServerSettingsSection /></div>
             <div id="api-tokens"><ApiTokensSection /></div>

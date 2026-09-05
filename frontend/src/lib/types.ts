@@ -35,7 +35,7 @@ export interface ImageEntry {
 export interface ServiceConfig {
   name: string
   model_path: string
-  input_mode: 'http' | 'rtsp' | 'video'
+  input_mode: 'http' | 'rtsp' | 'video' | 'udp_stream' | 'udp_packet'
   // HTTP mode
   input_host: string
   input_port: number
@@ -81,6 +81,22 @@ export interface ServiceConfig {
   enhance_gamma: number
   enhance_clahe: boolean
   enhance_clahe_clip: number
+  // Multi-car ranked output
+  result_car_count: number
+  // UDP input port
+  udp_port: number
+  // Rolling frame cache for backtracking (udp_packet mode only)
+  cache_enabled: boolean
+  cache_max_seconds: number
+  cache_max_frames: number
+  cache_max_bytes: number
+  cache_token?: string  // server-generated, read-only
+  // Direction detection tuning
+  dir_buf_size: number
+  dir_min_frames: number
+  dir_miss_tolerance: number
+  dir_idle_hold: number
+  dir_signal_threshold: number
 }
 
 export interface ServiceStatus {
@@ -100,6 +116,14 @@ export interface ServiceStatus {
   }
 }
 
+export interface RankedCar {
+  rank: number
+  detected: boolean
+  direction: string
+  confidence: number
+  area: number
+}
+
 export interface DetectionResult {
   service: string
   timestamp: number
@@ -112,6 +136,8 @@ export interface DetectionResult {
   direction: string
   gate_open: boolean
   fps: number
+  cars?: RankedCar[]
+  cars_rear?: RankedCar[]
 }
 
 export interface CountingConfig {
@@ -169,4 +195,6 @@ export interface Token {
   token: string
   label: string
   created_at: string
+  services: string[]
+  permissions: string[]
 }

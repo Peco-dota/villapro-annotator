@@ -91,7 +91,12 @@ def require_user(
     from app.config import get_config
     record = get_config().validate_token(raw)
     if record:
-        return {"username": record["label"], "role": "admin"}
+        return {
+            "username": record["label"],
+            "role": "api_token",
+            "services": record.get("services", []),
+            "permissions": record.get("permissions", ["stream", "results", "control"]),
+        }
 
     raise exc
 
@@ -100,6 +105,21 @@ def require_admin(current_user: dict = Depends(require_user)) -> dict:
     if current_user["role"] != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required.")
     return current_user
+
+
+def check_service_access(user: dict, service_name: str, permission: str) -> bool:
+    """Return True if the user (JWT or API token) can access the service with the given permission.
+
+    JWT admins always pass. API token users are checked against their services and permissions lists.
+    An empty services list means access to all services.
+    """
+    if user.get("role") != "api_token":
+        return True
+    allowed_services: list = user.get("services", [])
+    if allowed_services and service_name not in allowed_services:
+        return False
+    allowed_perms: list = user.get("permissions", ["stream", "results", "control"])
+    return permission in allowed_perms
 
 
 # ── Legacy API token system (commented out — keep for future re-enablement) ───

@@ -56,6 +56,151 @@ const defaults: Omit<ServiceConfig, 'name'> = {
   enhance_gamma: 1.0,
   enhance_clahe: false,
   enhance_clahe_clip: 2.0,
+  result_car_count: 1,
+  udp_port: 5500,
+  cache_enabled: false,
+  cache_max_seconds: 10,
+  cache_max_frames: 30,
+  cache_max_bytes: 20_000_000,
+  dir_buf_size: 8,
+  dir_min_frames: 4,
+  dir_miss_tolerance: 2,
+  dir_idle_hold: 5,
+  dir_signal_threshold: 0.005,
+}
+
+// ── Direction sensitivity presets ─────────────────────────────────────────────
+
+const DIR_PRESETS = [
+  {
+    id: 'stable',
+    label: 'Stable',
+    desc: 'Slow vehicles, needs reliable output. Less jitter, slower to react.',
+    values: { dir_signal_threshold: 0.003, dir_buf_size: 12, dir_min_frames: 6, dir_miss_tolerance: 3, dir_idle_hold: 8 },
+  },
+  {
+    id: 'balanced',
+    label: 'Balanced',
+    desc: 'Default. Works well for most parking lot cameras.',
+    values: { dir_signal_threshold: 0.005, dir_buf_size: 8, dir_min_frames: 4, dir_miss_tolerance: 2, dir_idle_hold: 5 },
+  },
+  {
+    id: 'responsive',
+    label: 'Responsive',
+    desc: 'Fast vehicles or high frame rate. Reacts quickly, may have more jitter.',
+    values: { dir_signal_threshold: 0.008, dir_buf_size: 5, dir_min_frames: 3, dir_miss_tolerance: 1, dir_idle_hold: 3 },
+  },
+] as const
+
+type DirPresetId = typeof DIR_PRESETS[number]['id']
+
+function getActivePreset(form: ServiceConfig): DirPresetId | 'custom' {
+  for (const p of DIR_PRESETS) {
+    const v = p.values
+    if (
+      form.dir_signal_threshold === v.dir_signal_threshold &&
+      form.dir_buf_size === v.dir_buf_size &&
+      form.dir_min_frames === v.dir_min_frames &&
+      form.dir_miss_tolerance === v.dir_miss_tolerance &&
+      form.dir_idle_hold === v.dir_idle_hold
+    ) return p.id
+  }
+  return 'custom'
+}
+
+function DirSensitivitySection({
+  form, setForm, set,
+}: {
+  form: ServiceConfig
+  setForm: React.Dispatch<React.SetStateAction<ServiceConfig>>
+  set: (k: keyof ServiceConfig) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => void
+}) {
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const active = getActivePreset(form)
+
+  const applyPreset = (id: DirPresetId) => {
+    const preset = DIR_PRESETS.find(p => p.id === id)!
+    setForm(f => ({ ...f, ...preset.values }))
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex gap-2">
+        {DIR_PRESETS.map(p => (
+          <button
+            key={p.id}
+            type="button"
+            onClick={() => applyPreset(p.id)}
+            className={`flex-1 px-3 py-2 rounded-lg border text-xs font-medium cursor-pointer transition-colors text-left
+              ${active === p.id
+                ? 'bg-violet-700/40 border-violet-500/60 text-violet-200'
+                : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-600'}`}
+          >
+            <div className="font-semibold mb-0.5">{p.label}</div>
+            <div className={`text-[10px] leading-tight ${active === p.id ? 'text-violet-300/70' : 'text-slate-600'}`}>{p.desc}</div>
+          </button>
+        ))}
+      </div>
+
+      {/* Advanced toggle row */}
+      <button
+        type="button"
+        onClick={() => setShowAdvanced(v => !v)}
+        className="flex items-center justify-between w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 hover:border-slate-500 cursor-pointer transition-colors group"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-medium text-slate-300 group-hover:text-slate-100 transition-colors">Advanced settings</span>
+          {active === 'custom' && (
+            <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-900/40 border border-amber-700/50 text-amber-400">custom</span>
+          )}
+        </div>
+        <span className="text-slate-500 text-xs transition-transform duration-200" style={{ display: 'inline-block', transform: showAdvanced ? 'rotate(180deg)' : 'rotate(0deg)' }}>▼</span>
+      </button>
+
+      {showAdvanced && (
+        <div className="flex flex-col gap-4 px-3 pt-1 pb-3 rounded-lg bg-slate-900/60 border border-slate-800">
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-medium text-slate-400">Signal threshold</label>
+              <span className="text-xs font-mono text-violet-300">{form.dir_signal_threshold.toFixed(4)}</span>
+            </div>
+            <input
+              type="range" min="0.001" max="0.02" step="0.001"
+              value={form.dir_signal_threshold}
+              onChange={e => setForm(f => ({ ...f, dir_signal_threshold: +e.target.value }))}
+              className="w-full accent-violet-500 h-1.5"
+            />
+            <div className="flex justify-between text-[10px] text-slate-600">
+              <span>0.001 — catches slow cars</span>
+              <span>0.02 — fast movement only</span>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-x-3 gap-y-4">
+            <div className="flex flex-col gap-1">
+              <Input label="Buffer window" type="number" min="3" max="30" step="1"
+                value={form.dir_buf_size} onChange={set('dir_buf_size')} />
+              <p className="text-[10px] text-slate-600">Frames kept in history for regression.<br/>More = smoother but slower to react.</p>
+            </div>
+            <div className="flex flex-col gap-1">
+              <Input label="Min frames" type="number" min="2" max="15" step="1"
+                value={form.dir_min_frames} onChange={set('dir_min_frames')} />
+              <p className="text-[10px] text-slate-600">Frames needed before a direction is reported.<br/>Higher = fewer false reports early on.</p>
+            </div>
+            <div className="flex flex-col gap-1">
+              <Input label="Miss tolerance" type="number" min="1" max="10" step="1"
+                value={form.dir_miss_tolerance} onChange={set('dir_miss_tolerance')} />
+              <p className="text-[10px] text-slate-600">Consecutive missed detections before history clears.<br/>Higher = survives brief occlusions (poles, trees).</p>
+            </div>
+            <div className="flex flex-col gap-1">
+              <Input label="Idle hold frames" type="number" min="1" max="15" step="1"
+                value={form.dir_idle_hold} onChange={set('dir_idle_hold')} />
+              <p className="text-[10px] text-slate-600">Idle votes needed to stop reporting a direction.<br/>Higher = less jitter when a car briefly slows down.</p>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
 }
 
 function Section({ label }: { label: string }) {
@@ -217,7 +362,8 @@ export function ServiceForm({ open, onClose, existing, existingCounter }: Props)
   const detectionValid = form.name.trim() !== '' &&
     form.model_path.trim() !== '' &&
     (form.input_mode !== 'rtsp' || (form.rtsp_ip.trim() !== '' && form.rtsp_user.trim() !== '')) &&
-    (form.input_mode !== 'video' || form.video_path.trim() !== '')
+    (form.input_mode !== 'video' || form.video_path.trim() !== '') &&
+    (!['udp_stream', 'udp_packet'].includes(form.input_mode) || form.udp_port > 0)
 
   const canSave = isEditCounter
     ? counterSource.trim() !== ''
@@ -334,14 +480,26 @@ export function ServiceForm({ open, onClose, existing, existingCounter }: Props)
               placeholder="yolo26n.pt" pickerTitle="Select YOLO model" />
 
             <Section label="Input source" />
-            <div className="flex gap-1 p-1 bg-slate-800 rounded-lg">
-              {(['http', 'rtsp', 'video'] as const).map(m => (
+            <div className="flex flex-col gap-1">
+              {([
+                ['rtsp',       'RTSP camera'],
+                ['http',       'HTTP POST'],
+                ['video',      'Video file'],
+                ['udp_stream', 'UDP stream'],
+                ['udp_packet', 'UDP packet'],
+              ] as const).map(([m, label]) => (
                 <button key={m}
+                  type="button"
                   onClick={() => setForm(f => ({ ...f, input_mode: m }))}
-                  className={`flex-1 py-1.5 rounded text-xs font-medium cursor-pointer transition-colors
-                    ${form.input_mode === m ? 'bg-violet-700 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+                  className={`flex items-center justify-between px-3 py-2.5 rounded-lg border text-left cursor-pointer transition-colors
+                    ${form.input_mode === m
+                      ? 'bg-violet-700/25 border-violet-500/50 text-violet-100'
+                      : 'bg-slate-800/60 border-slate-700/60 text-slate-400 hover:border-slate-600 hover:text-slate-200'}`}
                 >
-                  {m === 'http' ? 'HTTP endpoint' : m === 'rtsp' ? 'RTSP camera' : 'Video file'}
+                  <span className="text-xs font-semibold">{label}</span>
+                  {form.input_mode === m && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-violet-400 shrink-0" />
+                  )}
                 </button>
               ))}
             </div>
@@ -386,6 +544,55 @@ export function ServiceForm({ open, onClose, existing, existingCounter }: Props)
               </div>
             )}
 
+            {form.input_mode === 'udp_stream' && (
+              <>
+                <Input label="UDP listen port" type="number" value={form.udp_port} onChange={set('udp_port')} />
+                <Input label="Frame interval (s)" type="number" step="0.05" min="0.05" max="10"
+                  value={form.rtsp_interval} onChange={set('rtsp_interval')} />
+                <div className="bg-[#0f172a] border border-[#1e293b] rounded px-3 py-2">
+                  <p className="text-[10px] text-slate-600 mb-1">Sender command (ffmpeg example)</p>
+                  <p className="text-xs text-slate-400 font-mono break-all">
+                    {`ffmpeg -i input.mp4 -c:v libx264 -tune zerolatency -f mpegts udp://server-ip:${form.udp_port}`}
+                  </p>
+                  <p className="text-[10px] text-slate-500 mt-1">Start the service before sending</p>
+                </div>
+              </>
+            )}
+
+            {form.input_mode === 'udp_packet' && (
+              <>
+                <Input label="UDP listen port" type="number" value={form.udp_port} onChange={set('udp_port')} />
+                <div className="bg-[#0f172a] border border-[#1e293b] rounded px-3 py-2 text-xs text-slate-500">
+                  Sender sends one JPEG-encoded frame per UDP datagram. Max frame size: 65507 bytes.
+                  Use for embedded devices or custom senders at low resolution (e.g. 640×480).
+                </div>
+
+                <Check label="Frame cache (backtracking)"
+                  checked={form.cache_enabled} onChange={setBool('cache_enabled')}
+                  hint="Keep a short rolling buffer of recent frames so clients can fetch what led up to a detection. Adds unauthenticated, token-in-URL frame links to each result." />
+                {form.cache_enabled && (
+                  <div className="flex flex-col gap-2 pl-6">
+                    <div className="grid grid-cols-3 gap-3">
+                      <Input label="Max seconds" type="number" min="1" max="60" step="1"
+                        value={form.cache_max_seconds} onChange={set('cache_max_seconds')} />
+                      <Input label="Max frames" type="number" min="1" max="200" step="1"
+                        value={form.cache_max_frames} onChange={set('cache_max_frames')} />
+                      <Input label="Max size (bytes)" type="number" min="100000" step="100000"
+                        value={form.cache_max_bytes} onChange={set('cache_max_bytes')} />
+                    </div>
+                    {form.cache_token && (
+                      <div className="bg-[#0f172a] border border-[#1e293b] rounded px-3 py-2">
+                        <p className="text-[10px] text-slate-600 mb-1">Latest-frame URL (no auth required)</p>
+                        <p className="text-xs text-slate-400 font-mono break-all">
+                          {`/api/detection/services/${form.name}/cache/latest?token=${form.cache_token}`}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+
             {serviceType !== 'counter' && (
               <>
                 <Section label="Output push" />
@@ -406,6 +613,16 @@ export function ServiceForm({ open, onClose, existing, existingCounter }: Props)
                   value={initialCount} onChange={e => setInitialCount(+e.target.value)} />
               )}
             </div>
+            {serviceType !== 'counter' && (
+              <div className="flex flex-col gap-1">
+                <Input label="Cars to report (ranked by size)" type="number" min="1" max="10" step="1"
+                  value={form.result_car_count} onChange={set('result_car_count')} />
+                <p className="text-xs text-slate-600">
+                  How many cars to include in the <span className="font-mono text-slate-400">cars</span> array of each result payload.
+                  Rank 1 = closest (largest bbox), rank 2 = second closest, etc.
+                </p>
+              </div>
+            )}
 
             {serviceType !== 'counter' && (
               <>
@@ -474,6 +691,9 @@ export function ServiceForm({ open, onClose, existing, existingCounter }: Props)
                 )}
               </>
             )}
+
+            <Section label="Direction sensitivity" />
+            <DirSensitivitySection form={form} setForm={setForm} set={set} />
 
             <Section label="Image enhancement" />
             <p className="text-xs text-slate-600">Applied to every frame before YOLO inference. Useful for dark or low-contrast footage.</p>

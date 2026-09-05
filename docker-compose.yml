@@ -12,6 +12,8 @@ services:
       # TCP push ports — add one per service you configure, e.g.:
       - "9001:9001"
       # - "9002:9002"
+      # UDP input ports — 5500-5510 covers up to 11 simultaneous UDP services
+      - "5500-5510:5500-5510/udp"
     shm_size: '8gb'
     volumes:
       # All persistent user data — projects, models, recordings, config, database

@@ -87,11 +87,17 @@ class AppConfig:
                 return t
         return None
 
-    def create_token(self, label: str) -> str:
+    def create_token(self, label: str, services: list = None, permissions: list = None) -> str:
         from datetime import datetime, timezone
         token = secrets.token_hex(32)
         tokens = self._data.setdefault("api_tokens", [])
-        tokens.append({"label": label, "token": token, "created_at": datetime.now(timezone.utc).isoformat()})
+        tokens.append({
+            "label": label,
+            "token": token,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "services": services if services is not None else [],
+            "permissions": permissions if permissions is not None else ["stream", "results"],
+        })
         self.save()
         return token
 

@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import threading
 from typing import Optional, AsyncGenerator
 
@@ -13,7 +14,7 @@ from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from app.auth import require_user
+from app.auth import require_user, require_admin, check_service_access
 from app.detection_service import (
     get_registry, ServiceConfig,
     STATE_STOPPED, STATE_LOADING, STATE_RUNNING, STATE_ERROR,
@@ -141,6 +142,17 @@ class ServiceConfigIn(BaseModel):
     enhance_gamma: float = 1.0
     enhance_clahe: bool = False
     enhance_clahe_clip: float = 2.0
+    result_car_count: int = 1
+    udp_port: int = 0
+    cache_enabled: bool = False
+    cache_max_seconds: float = 10.0
+    cache_max_frames: int = 30
+    cache_max_bytes: int = 20_000_000
+    dir_buf_size: int = 8
+    dir_min_frames: int = 4
+    dir_miss_tolerance: int = 2
+    dir_idle_hold: int = 5
+    dir_signal_threshold: float = 0.005
 
 
 def _cfg_to_dict(cfg: ServiceConfig, registry) -> dict:
@@ -153,14 +165,25 @@ def _cfg_to_dict(cfg: ServiceConfig, registry) -> dict:
     return d
 
 
+def _require_service_access(user: dict, name: str, permission: str):
+    if not check_service_access(user, name, permission):
+        raise HTTPException(status_code=403, detail=f"Token not authorized for '{permission}' on service '{name}'.")
+
+
 @router.get("/services")
-def list_services(_user: dict = Depends(require_user)):
+def list_services(user: dict = Depends(require_user)):
     reg = get_registry()
-    return [_cfg_to_dict(c, reg) for c in reg.get_configs()]
+    configs = reg.get_configs()
+    if user.get("role") == "api_token":
+        allowed = user.get("services", [])
+        if allowed:
+            configs = [c for c in configs if c.name in allowed]
+    return [_cfg_to_dict(c, reg) for c in configs]
 
 
 @router.get("/services/{name}")
-def get_service(name: str, _user: dict = Depends(require_user)):
+def get_service(name: str, user: dict = Depends(require_user)):
+    _require_service_access(user, name, "results")
     reg = get_registry()
     cfg = reg.get_config(name)
     if cfg is None:
@@ -169,7 +192,7 @@ def get_service(name: str, _user: dict = Depends(require_user)):
 
 
 @router.post("/services", status_code=201)
-def create_or_update_service(req: ServiceConfigIn, _user: dict = Depends(require_user)):
+def create_or_update_service(req: ServiceConfigIn, _user: dict = Depends(require_admin)):
     cfg = ServiceConfig(
         name=req.name,
         model_path=req.model_path,
@@ -211,6 +234,17 @@ def create_or_update_service(req: ServiceConfigIn, _user: dict = Depends(require
         enhance_gamma=req.enhance_gamma,
         enhance_clahe=req.enhance_clahe,
         enhance_clahe_clip=req.enhance_clahe_clip,
+        result_car_count=req.result_car_count,
+        udp_port=req.udp_port,
+        cache_enabled=req.cache_enabled,
+        cache_max_seconds=req.cache_max_seconds,
+        cache_max_frames=req.cache_max_frames,
+        cache_max_bytes=req.cache_max_bytes,
+        dir_buf_size=req.dir_buf_size,
+        dir_min_frames=req.dir_min_frames,
+        dir_miss_tolerance=req.dir_miss_tolerance,
+        dir_idle_hold=req.dir_idle_hold,
+        dir_signal_threshold=req.dir_signal_threshold,
     )
     get_registry().upsert_config(cfg)
     return _cfg_to_dict(cfg, get_registry())
@@ -221,7 +255,7 @@ class DuplicateRequest(BaseModel):
 
 
 @router.post("/services/{name}/duplicate", status_code=201)
-def duplicate_service(name: str, req: DuplicateRequest, _user: dict = Depends(require_user)):
+def duplicate_service(name: str, req: DuplicateRequest, _user: dict = Depends(require_admin)):
     reg = get_registry()
     cfg = reg.get_config(name)
     if cfg is None:
@@ -231,12 +265,13 @@ def duplicate_service(name: str, req: DuplicateRequest, _user: dict = Depends(re
     import copy
     new_cfg = copy.deepcopy(cfg)
     new_cfg.name = req.new_name
+    new_cfg.cache_token = ""  # each service gets its own cache access secret
     reg.upsert_config(new_cfg)
     return _cfg_to_dict(new_cfg, reg)
 
 
 @router.delete("/services/{name}")
-def delete_service(name: str, _user: dict = Depends(require_user)):
+def delete_service(name: str, _user: dict = Depends(require_admin)):
     reg = get_registry()
     if reg.get_config(name) is None:
         raise HTTPException(status_code=404, detail=f"Service '{name}' not found.")
@@ -245,10 +280,42 @@ def delete_service(name: str, _user: dict = Depends(require_user)):
     return {"deleted": name}
 
 
+# ── Frame cache (udp_packet mode) — deliberately NOT behind require_user.
+# These are capability URLs: the token is the secret. Simple gate/BMS clients
+# that receive the payload over TCP push/HTTP POST can't attach a Bearer header.
+
+def _cache_service_or_404(name: str, token: str):
+    cfg = get_registry().get_config(name)
+    if cfg is None or not cfg.cache_enabled:
+        raise HTTPException(status_code=404, detail="Service not found or cache not enabled.")
+    if not cfg.cache_token or not secrets.compare_digest(token, cfg.cache_token):
+        raise HTTPException(status_code=403, detail="Invalid or missing cache token.")
+    return cfg, get_registry().get_service(name)
+
+
+@router.get("/services/{name}/cache/latest")
+def get_cache_latest(name: str, token: str = ""):
+    _cfg, svc = _cache_service_or_404(name, token)
+    frame = svc._frame_cache.latest() if svc and svc._frame_cache else None
+    if frame is None:
+        raise HTTPException(status_code=404, detail="No frame cached yet.")
+    return Response(content=frame.jpeg, media_type="image/jpeg")
+
+
+@router.get("/services/{name}/cache/frame/{frame_id}")
+def get_cache_frame(name: str, frame_id: str, token: str = ""):
+    _cfg, svc = _cache_service_or_404(name, token)
+    frame = svc._frame_cache.get(frame_id) if svc and svc._frame_cache else None
+    if frame is None:
+        raise HTTPException(status_code=404, detail="Frame not found or evicted from cache.")
+    return Response(content=frame.jpeg, media_type="image/jpeg")
+
+
 # ── Start / stop ──────────────────────────────────────────────────────────────
 
 @router.post("/services/{name}/start")
-def start_service(name: str, _user: dict = Depends(require_user)):
+def start_service(name: str, user: dict = Depends(require_user)):
+    _require_service_access(user, name, "control")
     reg = get_registry()
     # Clear stale results from the previous run so the receiver shows a fresh feed
     _result_buffer.pop(name, None)
@@ -263,7 +330,8 @@ def start_service(name: str, _user: dict = Depends(require_user)):
 
 
 @router.post("/services/{name}/stop")
-def stop_service(name: str, _user: dict = Depends(require_user)):
+def stop_service(name: str, user: dict = Depends(require_user)):
+    _require_service_access(user, name, "control")
     reg = get_registry()
     if reg.get_config(name) is None:
         raise HTTPException(status_code=404, detail=f"Service '{name}' not found.")
@@ -272,7 +340,8 @@ def stop_service(name: str, _user: dict = Depends(require_user)):
 
 
 @router.post("/services/{name}/restart")
-def restart_service(name: str, _user: dict = Depends(require_user)):
+def restart_service(name: str, user: dict = Depends(require_user)):
+    _require_service_access(user, name, "control")
     reg = get_registry()
 
     def _on_done(error: str):
@@ -287,7 +356,8 @@ def restart_service(name: str, _user: dict = Depends(require_user)):
 # ── Service status & log ──────────────────────────────────────────────────────
 
 @router.get("/services/{name}/status")
-def get_service_status(name: str, _user: dict = Depends(require_user)):
+def get_service_status(name: str, user: dict = Depends(require_user)):
+    _require_service_access(user, name, "results")
     reg = get_registry()
     cfg = reg.get_config(name)
     if cfg is None:
@@ -308,8 +378,9 @@ def get_service_status(name: str, _user: dict = Depends(require_user)):
 
 
 @router.get("/services/{name}/result")
-def get_service_result(name: str, _user: dict = Depends(require_user)):
+def get_service_result(name: str, user: dict = Depends(require_user)):
     """Return the last detection result for this service (same payload as SSE/TCP push)."""
+    _require_service_access(user, name, "results")
     reg = get_registry()
     if reg.get_config(name) is None:
         raise HTTPException(status_code=404, detail=f"Service '{name}' not found.")
@@ -320,7 +391,8 @@ def get_service_result(name: str, _user: dict = Depends(require_user)):
 
 
 @router.get("/services/{name}/log")
-def get_service_log(name: str, _user: dict = Depends(require_user)):
+def get_service_log(name: str, user: dict = Depends(require_user)):
+    _require_service_access(user, name, "results")
     reg = get_registry()
     svc = reg.get_service(name)
     if svc is None:
@@ -332,7 +404,8 @@ def get_service_log(name: str, _user: dict = Depends(require_user)):
 
 @router.post("/services/{name}/recording/start")
 def start_recording(name: str, record_dir: Optional[str] = None,
-                    _user: dict = Depends(require_user)):
+                    user: dict = Depends(require_user)):
+    _require_service_access(user, name, "control")
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -343,7 +416,8 @@ def start_recording(name: str, record_dir: Optional[str] = None,
 
 
 @router.post("/services/{name}/recording/stop")
-def stop_recording(name: str, _user: dict = Depends(require_user)):
+def stop_recording(name: str, user: dict = Depends(require_user)):
+    _require_service_access(user, name, "control")
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -355,7 +429,7 @@ def stop_recording(name: str, _user: dict = Depends(require_user)):
 
 @router.post("/services/{name}/debug/start")
 def start_debug(name: str, path: Optional[str] = None,
-                _user: dict = Depends(require_user)):
+                _user: dict = Depends(require_admin)):
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail=f"Service '{name}' not found in registry. Make sure it is running.")
@@ -379,7 +453,7 @@ def start_debug(name: str, path: Optional[str] = None,
 
 
 @router.post("/services/{name}/debug/stop")
-def stop_debug(name: str, _user: dict = Depends(require_user)):
+def stop_debug(name: str, _user: dict = Depends(require_admin)):
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail=f"Service '{name}' not found in registry.")
@@ -396,7 +470,8 @@ def stop_debug(name: str, _user: dict = Depends(require_user)):
 # ── Video controls ────────────────────────────────────────────────────────────
 
 @router.post("/services/{name}/video/pause")
-def toggle_pause(name: str, _user: dict = Depends(require_user)):
+def toggle_pause(name: str, user: dict = Depends(require_user)):
+    _require_service_access(user, name, "control")
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -405,7 +480,8 @@ def toggle_pause(name: str, _user: dict = Depends(require_user)):
 
 
 @router.post("/services/{name}/video/speed")
-def set_speed(name: str, speed: float, _user: dict = Depends(require_user)):
+def set_speed(name: str, speed: float, user: dict = Depends(require_user)):
+    _require_service_access(user, name, "control")
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -415,7 +491,8 @@ def set_speed(name: str, speed: float, _user: dict = Depends(require_user)):
 
 @router.post("/services/{name}/video/seek")
 def seek_video(name: str, ms: Optional[float] = None,
-               delta: Optional[float] = None, _user: dict = Depends(require_user)):
+               delta: Optional[float] = None, user: dict = Depends(require_user)):
+    _require_service_access(user, name, "control")
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -429,7 +506,8 @@ def seek_video(name: str, ms: Optional[float] = None,
 
 
 @router.post("/services/{name}/video/step")
-def step_frame(name: str, _user: dict = Depends(require_user)):
+def step_frame(name: str, user: dict = Depends(require_user)):
+    _require_service_access(user, name, "control")
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -438,7 +516,8 @@ def step_frame(name: str, _user: dict = Depends(require_user)):
 
 
 @router.post("/services/{name}/video/reverse")
-def toggle_reverse(name: str, _user: dict = Depends(require_user)):
+def toggle_reverse(name: str, user: dict = Depends(require_user)):
+    _require_service_access(user, name, "control")
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -447,7 +526,8 @@ def toggle_reverse(name: str, _user: dict = Depends(require_user)):
 
 
 @router.get("/services/{name}/video/state")
-def get_video_state(name: str, _user: dict = Depends(require_user)):
+def get_video_state(name: str, user: dict = Depends(require_user)):
+    _require_service_access(user, name, "results")
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -458,7 +538,8 @@ def get_video_state(name: str, _user: dict = Depends(require_user)):
 # ── Preview frame (JPEG snapshot) ────────────────────────────────────────────
 
 @router.post("/services/{name}/preview/start")
-def start_preview(name: str, _user: dict = Depends(require_user)):
+def start_preview(name: str, user: dict = Depends(require_user)):
+    _require_service_access(user, name, "stream")
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -469,7 +550,8 @@ def start_preview(name: str, _user: dict = Depends(require_user)):
 
 
 @router.post("/services/{name}/preview/stop")
-def stop_preview(name: str, _user: dict = Depends(require_user)):
+def stop_preview(name: str, user: dict = Depends(require_user)):
+    _require_service_access(user, name, "stream")
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -478,8 +560,9 @@ def stop_preview(name: str, _user: dict = Depends(require_user)):
 
 
 @router.get("/services/{name}/preview/frame")
-def get_preview_frame(name: str, token: Optional[str] = None, _user: dict = Depends(require_user)):
+def get_preview_frame(name: str, token: Optional[str] = None, user: dict = Depends(require_user)):
     """Return latest annotated frame as a JPEG image."""
+    _require_service_access(user, name, "stream")
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -495,12 +578,9 @@ def get_preview_frame(name: str, token: Optional[str] = None, _user: dict = Depe
 
 @router.get("/services/{name}/preview/mjpeg")
 async def mjpeg_stream(request: Request, name: str, token: Optional[str] = None,
-                       _user: dict = Depends(require_user)):
-    """Stream annotated frames as MJPEG.
-
-    Each connected viewer gets its own queue so multiple tabs/clients all
-    receive every frame independently without competing for the same data.
-    """
+                       user: dict = Depends(require_user)):
+    """Stream annotated frames as MJPEG."""
+    _require_service_access(user, name, "stream")
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -538,7 +618,7 @@ async def mjpeg_stream(request: Request, name: str, token: Optional[str] = None,
 
 @router.post("/services/{name}/dataset/start")
 def start_dataset(name: str, dataset_dir: Optional[str] = None,
-                  interval: Optional[int] = None, _user: dict = Depends(require_user)):
+                  interval: Optional[int] = None, _user: dict = Depends(require_admin)):
     svc = get_registry().get_service(name)
     cfg = get_registry().get_config(name)
     if svc is None or cfg is None:
@@ -551,7 +631,7 @@ def start_dataset(name: str, dataset_dir: Optional[str] = None,
 
 
 @router.post("/services/{name}/dataset/stop")
-def stop_dataset(name: str, _user: dict = Depends(require_user)):
+def stop_dataset(name: str, _user: dict = Depends(require_admin)):
     svc = get_registry().get_service(name)
     if svc is None:
         raise HTTPException(status_code=404, detail="Service not running.")
@@ -571,7 +651,7 @@ class TcpPushStartRequest(BaseModel):
 
 @router.post("/services/{name}/tcp/start")
 def start_tcp_push(name: str, req: TcpPushStartRequest,
-                   _user: dict = Depends(require_user)):
+                   _user: dict = Depends(require_admin)):
     reg = get_registry()
     cfg = reg.get_config(name)
     if cfg is None:
@@ -599,7 +679,7 @@ def start_tcp_push(name: str, req: TcpPushStartRequest,
 
 
 @router.post("/services/{name}/tcp/stop")
-def stop_tcp_push(name: str, _user: dict = Depends(require_user)):
+def stop_tcp_push(name: str, _user: dict = Depends(require_admin)):
     get_tcp_registry().stop(name)
     return {"tcp_push": False}
 
@@ -619,16 +699,27 @@ async def sse_stream(name: str, request: Request,
     Authentication: pass JWT as ?token=<value> query param
     (Authorization header doesn't work well with EventSource in browsers).
     """
-    from app.auth import _SECRET, _ALGORITHM
+    from app.auth import _SECRET, _ALGORITHM, check_service_access
     from jose import JWTError, jwt as _jwt
     from app.config import get_config
     if not token:
         raise HTTPException(status_code=401, detail="Missing token.")
+    user_ctx: dict = {}
     try:
-        _jwt.decode(token, _SECRET, algorithms=[_ALGORITHM])
+        payload = _jwt.decode(token, _SECRET, algorithms=[_ALGORITHM])
+        user_ctx = {"username": payload.get("sub", ""), "role": payload.get("role", "customer")}
     except JWTError:
-        if not get_config().validate_token(token):
+        record = get_config().validate_token(token)
+        if not record:
             raise HTTPException(status_code=401, detail="Invalid token.")
+        user_ctx = {
+            "username": record["label"],
+            "role": "api_token",
+            "services": record.get("services", []),
+            "permissions": record.get("permissions", ["stream", "results", "control"]),
+        }
+    if not check_service_access(user_ctx, name, "stream"):
+        raise HTTPException(status_code=403, detail=f"Token not authorized for 'stream' on service '{name}'.")
 
     reg = get_registry()
     if reg.get_config(name) is None:
@@ -659,6 +750,69 @@ async def sse_stream(name: str, request: Request,
                 pass
 
     return EventSourceResponse(generator())
+
+
+@router.get("/services/{name}/stream/ndjson")
+async def ndjson_stream(name: str, request: Request, token: Optional[str] = None):
+    """NDJSON stream — one JSON object per line, newline-delimited.
+
+    Same auth as SSE (?token= query param or Authorization: Bearer header).
+    Keepalive: empty lines are sent every 5 s when there are no results.
+    Content-Type: application/x-ndjson
+    """
+    from app.auth import _SECRET, _ALGORITHM, check_service_access
+    from jose import JWTError, jwt as _jwt
+    from app.config import get_config
+
+    # Also accept token from Authorization header for clients that can set headers
+    if not token:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:]
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing token.")
+
+    user_ctx: dict = {}
+    try:
+        jwt_payload = _jwt.decode(token, _SECRET, algorithms=[_ALGORITHM])
+        user_ctx = {"username": jwt_payload.get("sub", ""), "role": jwt_payload.get("role", "customer")}
+    except JWTError:
+        record = get_config().validate_token(token)
+        if not record:
+            raise HTTPException(status_code=401, detail="Invalid token.")
+        user_ctx = {
+            "username": record["label"],
+            "role": "api_token",
+            "services": record.get("services", []),
+            "permissions": record.get("permissions", ["stream", "results", "control"]),
+        }
+    if not check_service_access(user_ctx, name, "stream"):
+        raise HTTPException(status_code=403, detail=f"Token not authorized for 'stream' on service '{name}'.")
+
+    reg = get_registry()
+    if reg.get_config(name) is None:
+        raise HTTPException(status_code=404, detail=f"Service '{name}' not found.")
+
+    q: asyncio.Queue = asyncio.Queue(maxsize=50)
+    _sse_queues.setdefault(name, []).append(q)
+
+    async def generate():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.wait_for(q.get(), timeout=5.0)
+                    yield json.dumps(payload) + "\n"
+                except asyncio.TimeoutError:
+                    yield "\n"  # keepalive — clients should skip empty lines
+        finally:
+            try:
+                _sse_queues[name].remove(q)
+            except (ValueError, KeyError):
+                pass
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 
 # ── Result receiver (built-in push endpoint for services) ─────────────────────

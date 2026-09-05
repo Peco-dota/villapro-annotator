@@ -15,6 +15,7 @@ import io
 import json
 import os
 import queue
+import secrets
 import socket
 import threading
 import time
@@ -27,6 +28,8 @@ from typing import Optional, Callable
 import numpy as np
 import requests
 from PIL import Image
+
+from app.frame_cache import FrameCache
 
 log = logging.getLogger("detection_service")
 
@@ -189,6 +192,24 @@ class ServiceConfig:
     enhance_gamma: float = 1.0     # < 1.0 = brighter (try 0.4–0.6 for dark); 1.0 = off
     enhance_clahe: bool = False    # adaptive local contrast equalization (good for uneven lighting)
     enhance_clahe_clip: float = 2.0  # CLAHE clip limit — higher = more aggressive (2–8 typical)
+    # Multi-car result: how many cars to include in the ranked `cars` array (1 = closest only)
+    result_car_count: int = 1
+    # UDP input port (used when input_mode is "udp_stream" or "udp_packet")
+    udp_port: int = 0
+    # Rolling frame cache for backtracking (udp_packet mode only). Lets clients
+    # fetch recent frames + bbox info around a detection via unauthenticated,
+    # token-in-URL links (cache_token), since UDP clients often can't send headers.
+    cache_enabled: bool = False
+    cache_max_seconds: float = 10.0
+    cache_max_frames: int = 30
+    cache_max_bytes: int = 20_000_000
+    cache_token: str = ""  # server-generated on first enable; not user-editable
+    # Direction detection tuning
+    dir_buf_size: int = 8            # sliding window length (frames kept in regression buffer)
+    dir_min_frames: int = 4          # min frames in buffer before direction is reported
+    dir_miss_tolerance: int = 2      # consecutive misses before buffer is cleared
+    dir_idle_hold: int = 5           # consecutive idle votes required to leave a moving state
+    dir_signal_threshold: float = 0.005  # minimum relative change per frame to count as a signal
 
     @property
     def rtsp_url(self) -> str:
@@ -203,7 +224,7 @@ class ServiceConfig:
     @staticmethod
     def from_dict(d: dict) -> "ServiceConfig":
         input_mode = str(d.get("input_mode", "")).strip().lower()
-        if input_mode not in {"http", "rtsp", "video"}:
+        if input_mode not in {"http", "rtsp", "video", "udp_stream", "udp_packet"}:
             input_mode = "rtsp" if d.get("rtsp_enabled", False) else "http"
 
         return ServiceConfig(
@@ -248,6 +269,18 @@ class ServiceConfig:
             enhance_gamma=float(d.get("enhance_gamma", 1.0)),
             enhance_clahe=d.get("enhance_clahe", False),
             enhance_clahe_clip=float(d.get("enhance_clahe_clip", 2.0)),
+            result_car_count=int(d.get("result_car_count", 1)),
+            udp_port=int(d.get("udp_port", 0)),
+            cache_enabled=d.get("cache_enabled", False),
+            cache_max_seconds=float(d.get("cache_max_seconds", 10.0)),
+            cache_max_frames=int(d.get("cache_max_frames", 30)),
+            cache_max_bytes=int(d.get("cache_max_bytes", 20_000_000)),
+            cache_token=d.get("cache_token", ""),
+            dir_buf_size=int(d.get("dir_buf_size", 8)),
+            dir_min_frames=int(d.get("dir_min_frames", 4)),
+            dir_miss_tolerance=int(d.get("dir_miss_tolerance", 2)),
+            dir_idle_hold=int(d.get("dir_idle_hold", 5)),
+            dir_signal_threshold=float(d.get("dir_signal_threshold", 0.005)),
         )
 
 
@@ -339,6 +372,7 @@ def _determine_direction(
     forward_threshold: int = 1,
     backward_threshold: int = -3,
     signal_threshold: float = 0.005,
+    min_frames: int = _MIN_DIR_FRAMES,
     debug_out: Optional[dict] = None,
 ) -> str:
     """Determine direction from a history of (cx, cy, area) tuples.
@@ -368,7 +402,7 @@ def _determine_direction(
             Defaults to -3 (all three signals must agree).  Set to -2 when
             use_area=False so that two centroid signals agreeing is sufficient.
     """
-    if len(history) < _MIN_DIR_FRAMES:
+    if len(history) < min_frames:
         return "idle"
 
     n = len(history)
@@ -510,143 +544,100 @@ class LogEntry:
 # ── Flask app factory (HTTP mode) ──────────────────────────────────────────────
 
 def _make_flask_app(
+    service_ref: "DetectionService",
     service_name: str,
     model_holder: dict,
     output_url: Optional[str],
     log_callback: Callable[[LogEntry], None],
     conf_threshold: float = 0.5,
-    strict_output: bool = False,
-    state_changes_only: bool = False,
-    dataset_capture: bool = False,
-    dataset_interval: int = 10,
-    dataset_dir: str = "",
 ):
+    """Build the Flask app for HTTP input mode.
+
+    Each POST to /detect accepts one or more images (multipart form-data, field "images").
+    Images are processed in order and fed into the same persistent sliding-window state
+    that RTSP/video mode uses — so direction tracking, gate logic, and ranked-car output
+    all work identically regardless of whether images arrive one-at-a-time or in small
+    batches.  Sending ~4 images/sec gives the same quality of direction tracking as a
+    live camera stream.
+    """
     from flask import Flask, request, jsonify
     app = Flask(f"detection_service_{service_name}")
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
-    # Per-class state for state_changes_only mode (persists across HTTP requests)
-    _http_state: dict = {"car": "", "car_rear": ""}
 
     @app.route("/detect", methods=["POST"])
     def detect():
         model = model_holder.get("model")
         if model is None:
-            entry = LogEntry.from_error("Model not loaded")
-            log_callback(entry)
+            log_callback(LogEntry.from_error("Model not loaded"))
             return jsonify({"error": "Model not loaded"}), 503
 
         files = request.files.getlist("images")
         if not files:
-            entry = LogEntry.from_error("No images provided")
-            log_callback(entry)
+            log_callback(LogEntry.from_error("No images provided"))
             return jsonify({"error": "No images provided"}), 400
 
-        # Per-class histories of (cx, cy, area) tuples
-        histories:    dict[str, list] = {"car": [], "car_rear": []}
-        confidences:  dict[str, list] = {"car": [], "car_rear": []}
+        import torch as _torch
+        last_payload: dict = {}
 
-        for http_frame_idx, f in enumerate(files):
+        for f in files:
             try:
                 img = Image.open(io.BytesIO(f.read())).convert("RGB")
-                img_np = np.array(img)
+                # Convert RGB→BGR to match RTSP/video convention expected by
+                # _process_rtsp_frame, _enhance_frame, and _save_dataset_frame.
+                img_np = np.array(img)[:, :, ::-1].copy()
             except Exception as e:
-                log.warning(f"Failed to decode image: {e}")
+                log.warning(f"[{service_name}] Failed to decode image: {e}")
                 continue
 
-            if dataset_capture and dataset_dir and (http_frame_idx % dataset_interval == 0):
-                _save_dataset_frame(img_np[:, :, ::-1], service_name, dataset_dir)
+            cfg = service_ref._config
+            if cfg is not None and (cfg.enhance_gamma != 1.0 or cfg.enhance_clahe):
+                img_np = service_ref._enhance_frame(
+                    img_np, cfg.enhance_gamma, cfg.enhance_clahe, cfg.enhance_clahe_clip
+                )
 
-            import torch as _torch
             with _torch.no_grad():
                 results = model(img_np, conf=conf_threshold, verbose=False)
-            if not results:
-                continue
 
-            result = results[0]
-            for cls_name in ("car", "car_rear"):
-                box = _largest_box(result, cls_name)
-                if box is not None:
-                    cx, cy = _bbox_centroid(box)
-                    histories[cls_name].append((cx, cy, _bbox_area(box)))
-                    confidences[cls_name].append(float(box.conf[0]))
-            del results
+            service_ref._dataset_frame_count += 1
+            cfg = service_ref._config  # re-read in case a live upsert happened
 
-        def _resolve(cls_name: str) -> dict:
-            hist = histories[cls_name]
-            confs = confidences[cls_name]
-            detected = bool(hist)
-            if not detected:
-                current_state = "no_car"
-            elif len(hist) >= _MIN_DIR_FRAMES:
-                if cls_name == "car_rear":
-                    # For car_rear, exclude the area signal to avoid the partial-reveal
-                    # artefact (bbox grows as the car enters frame even though it's leaving),
-                    # and require only 2 centroid signals to agree (threshold -2 instead of -3).
-                    raw = _determine_direction(hist, use_area=False, forward_threshold=2, backward_threshold=-1, signal_threshold=0.005)
-                else:
-                    raw = _determine_direction(hist)
-                current_state = _invert_direction(raw) if cls_name == "car_rear" else raw
-            else:
-                current_state = None  # still building
-            avg_conf = round(sum(confs) / len(confs), 4) if confs else 0.0
-            return {
-                "detected": detected,
-                "direction": current_state if current_state is not None else "idle",
-                "confidence": avg_conf,
-                "_current_state": current_state,
-            }
+            payload = service_ref._process_rtsp_frame(
+                results, img_np, output_url, service_name,
+                cfg.strict_output          if cfg else False,
+                cfg.state_changes_only     if cfg else False,
+                service_ref._dataset_capturing_active,
+                service_ref._dataset_interval_runtime,
+                service_ref._dataset_dir_runtime,
+                service_ref._dataset_frame_count,
+                cfg.gate_trigger_mode      if cfg else "off",
+                cfg.gate_area_threshold    if cfg else 0.0,
+                cfg.gate_line              if cfg else [],
+                cfg.gate_line_side         if cfg else [],
+                cfg.result_car_count       if cfg else 1,
+            )
+            if payload:
+                last_payload = payload
+                service_ref._last_payload = payload
 
-        car_res  = _resolve("car")
-        rear_res = _resolve("car_rear")
-
-        payload = {
-            "service_name": service_name,
-            "timestamp": datetime.now().strftime("%H:%M:%S"),
-            "car": {
-                "detected":   car_res["detected"],
-                "direction":  car_res["direction"],
-                "confidence": car_res["confidence"],
-            },
-            "car_rear": {
-                "detected":   rear_res["detected"],
-                "direction":  rear_res["direction"],
-                "confidence": rear_res["confidence"],
-            },
-            "frames_analyzed": len(files),
-        }
-
-        if state_changes_only:
-            should_report = False
-            for cls_name, res in (("car", car_res), ("car_rear", rear_res)):
-                cs = res["_current_state"]
-                prev = _http_state[cls_name]
-                if cs is None or cs == prev:
-                    continue
-                # Don't emit "idle" as the very first state after the car appears —
-                # wait for a definitive direction so the report is no_car → forward/backward,
-                # not no_car → idle → forward/backward.
-                if cs == "idle" and prev in ("", "no_car"):
-                    continue
-                _http_state[cls_name] = cs
-                should_report = True
-        elif strict_output:
-            car_ok  = car_res["detected"]  and car_res["_current_state"]  is not None
-            rear_ok = rear_res["detected"] and rear_res["_current_state"] is not None
-            no_car  = not car_res["detected"] and not rear_res["detected"]
-            should_report = car_ok or rear_ok or no_car
-        else:
-            should_report = True
-
-        if should_report:
-            log_callback(LogEntry.from_result(payload))
-            _notify_internal(payload.get("service_name", "unknown"), payload)
-            if output_url:
+            if service_ref._preview_enabled and results:
                 try:
-                    requests.post(output_url, json=payload, timeout=2)
+                    _frame = results[0].plot()
+                    try:
+                        service_ref._preview_queue.put_nowait(_frame)
+                    except queue.Full:
+                        pass
+                    _notify_mjpeg_frame(service_name, _frame)
                 except Exception:
-                    pass  # output server not running — silently skip
+                    pass
 
-        return jsonify(payload)
+            try:
+                del results
+            except NameError:
+                pass
+
+        if not last_payload:
+            return jsonify({"service_name": service_name, "available": False})
+        return jsonify(last_payload)
 
     @app.route("/status", methods=["GET"])
     def status():
@@ -727,11 +718,22 @@ class DetectionService:
         self._use_tracking: bool = False
         self._track_state: dict[tuple[str, int], dict] = {}
         self._prev_track_ids: set[tuple[str, int]] = set()
+        # Per-rank direction buffers for ranks 2-N of each class (ranked multi-car output).
+        # Dict key = class name ("car" / "car_rear"), value = list of state dicts (one per extra slot).
+        self._extra_ranked_states: dict[str, list[dict]] = {}
+        # Direction detection parameters (overwritten from cfg in start_async)
+        self._dir_buf_size: int = 8
+        self._dir_min_frames: int = 4
+        self._dir_miss_tolerance: int = 2
+        self._dir_idle_hold: int = 5
+        self._dir_signal_threshold: float = 0.005
+        # Rolling frame cache (udp_packet mode only, when cfg.cache_enabled)
+        self._frame_cache: Optional[FrameCache] = None
 
     @staticmethod
-    def _make_class_state() -> dict:
+    def _make_class_state(buf_size: int = 8) -> dict:
         return {
-            cls: {"buffer": deque(maxlen=8), "misses": 0, "last_state": "", "idle_streak": 0, "prev_area": 0.0}
+            cls: {"buffer": deque(maxlen=buf_size), "misses": 0, "last_state": "", "idle_streak": 0, "prev_area": 0.0}
             for cls in ("car", "car_rear")
         }
 
@@ -777,11 +779,21 @@ class DetectionService:
         self._dataset_capturing_active = cfg.dataset_capture
         self._dataset_dir_runtime = cfg.dataset_dir
         self._dataset_interval_runtime = cfg.dataset_interval
-        self._class_state = self._make_class_state()
+        self._dir_buf_size = cfg.dir_buf_size
+        self._dir_min_frames = cfg.dir_min_frames
+        self._dir_miss_tolerance = cfg.dir_miss_tolerance
+        self._dir_idle_hold = cfg.dir_idle_hold
+        self._dir_signal_threshold = cfg.dir_signal_threshold
+        self._class_state = self._make_class_state(self._dir_buf_size)
         self._gate_last_open = False
         self._dataset_frame_count = 0
+        n_extra = max(0, cfg.result_car_count - 1)
+        self._extra_ranked_states = {
+            cls: [{"buffer": deque(maxlen=cfg.dir_buf_size), "misses": 0, "last_state": "", "idle_streak": 0} for _ in range(n_extra)]
+            for cls in ("car", "car_rear")
+        }
         mode = (cfg.input_mode or ("rtsp" if cfg.rtsp_enabled else "http")).lower()
-        self._record_enabled = bool(cfg.record_stream and mode in ("rtsp", "video"))
+        self._record_enabled = bool(cfg.record_stream and mode in ("rtsp", "video", "udp_stream"))
         self._record_dir_cfg = cfg.record_dir
         self._close_video_writer()
         self._stop_event.clear()  # clear before spawning so a stop() during load is not wiped out
@@ -815,6 +827,10 @@ class DetectionService:
             return self._do_start_rtsp(cfg)
         if mode == "video":
             return self._do_start_video(cfg)
+        if mode == "udp_stream":
+            return self._do_start_udp_stream(cfg)
+        if mode == "udp_packet":
+            return self._do_start_udp_packet(cfg)
         return self._do_start_http(cfg)
 
     # ── HTTP mode ──────────────────────────────────────────────────────────────
@@ -835,13 +851,8 @@ class DetectionService:
             if cfg.output_host.strip() else None
         )
         app = _make_flask_app(
-            cfg.name, self._model_holder, output_url, self._append_log,
+            self, cfg.name, self._model_holder, output_url, self._append_log,
             conf_threshold=cfg.conf_threshold,
-            strict_output=cfg.strict_output,
-            state_changes_only=cfg.state_changes_only,
-            dataset_capture=cfg.dataset_capture,
-            dataset_interval=cfg.dataset_interval,
-            dataset_dir=cfg.dataset_dir,
         )
 
         from werkzeug.serving import make_server
@@ -879,7 +890,6 @@ class DetectionService:
             os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
         rtsp_url = cfg.rtsp_url
 
-        # Test that the stream opens before returning success
         cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
         if not cap.isOpened():
             cap.release()
@@ -895,17 +905,18 @@ class DetectionService:
             f"http://{cfg.output_host}:{cfg.output_port}/result"
             if cfg.output_host else None
         )
+        return self._run_capture_loop(cfg, rtsp_url, output_url)
 
-        # Shared latest frame between reader and processing threads
+    def _run_capture_loop(self, cfg: ServiceConfig, url: str, output_url) -> str:
+        """Reader + inference loop shared by RTSP and UDP-stream modes."""
+        import cv2
+
         latest: dict = {"frame": None, "ok": False}
         latest_lock = threading.Lock()
 
         def _reader():
-            """Continuously reads frames as fast as the stream delivers them.
-            Only the most recent frame is kept — old frames are discarded,
-            which prevents the processing thread from working on stale data."""
             import cv2 as _cv2
-            _cap = _cv2.VideoCapture(rtsp_url, _cv2.CAP_FFMPEG)
+            _cap = _cv2.VideoCapture(url, _cv2.CAP_FFMPEG)
             _cap.set(_cv2.CAP_PROP_BUFFERSIZE, 1)
             with self._cap_lock:
                 self._active_cap = _cap
@@ -915,7 +926,6 @@ class DetectionService:
                 try:
                     ret, frame = _cap.read()
                 except Exception:
-                    # cap was force-released by stop() while read() was blocking
                     break
                 if not ret:
                     consecutive_fails += 1
@@ -925,7 +935,7 @@ class DetectionService:
                         latest["ok"] = False
                     if self._stop_event.wait(timeout=3.0):
                         break
-                    _cap = _cv2.VideoCapture(rtsp_url, _cv2.CAP_FFMPEG)
+                    _cap = _cv2.VideoCapture(url, _cv2.CAP_FFMPEG)
                     _cap.set(_cv2.CAP_PROP_BUFFERSIZE, 1)
                     with self._cap_lock:
                         self._active_cap = _cap
@@ -941,7 +951,6 @@ class DetectionService:
                 self._active_cap = None
 
         def _loop():
-            """Processes the latest available frame at the configured interval."""
             import torch
             _frame_count_local = 0
 
@@ -978,6 +987,7 @@ class DetectionService:
                         self._config.gate_area_threshold,
                         self._config.gate_line,
                         self._config.gate_line_side,
+                        self._config.result_car_count,
                     )
                     if frame_summary:
                         self._last_payload = frame_summary
@@ -997,21 +1007,143 @@ class DetectionService:
                 except Exception as e:
                     self._append_log(LogEntry.from_error(str(e)))
                 finally:
-                    # Explicitly release result tensors — YOLO results hold GPU memory
-                    # and Python's GC won't always collect them promptly in a tight loop
                     try:
                         del results
                     except NameError:
                         pass
                     _frame_count_local += 1
-                    # Periodically flush the CUDA cache to prevent silent accumulation
                     if _frame_count_local % 500 == 0 and torch.cuda.is_available():
                         torch.cuda.empty_cache()
 
-        self._reader_thread = threading.Thread(target=_reader, daemon=True, name=f"RTSPReader-{cfg.name}")
+        self._reader_thread = threading.Thread(target=_reader, daemon=True, name=f"CaptureReader-{cfg.name}")
         self._reader_thread.start()
 
-        self._thread = threading.Thread(target=_loop, daemon=True, name=f"RTSPThread-{cfg.name}")
+        self._thread = threading.Thread(target=_loop, daemon=True, name=f"CaptureLoop-{cfg.name}")
+        self._thread.start()
+        return ""
+
+    def _do_start_udp_stream(self, cfg: ServiceConfig) -> str:
+        """UDP MPEG-TS/H.264 stream input — sender pushes a continuous stream to our port."""
+        try:
+            from ultralytics import YOLO
+            device = _best_device()
+            model = YOLO(cfg.model_path)
+            model.to(device)
+            log.info(f"[{cfg.name}] Model loaded on {device.upper()}")
+            self._model_holder["model"] = model
+        except Exception as e:
+            return f"Failed to load model: {e}"
+
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "overrun_nonfatal;1|fifo_size;5000000"
+        url = f"udp://@0.0.0.0:{cfg.udp_port}?overrun_nonfatal=1&fifo_size=5000000"
+        output_url = (
+            f"http://{cfg.output_host}:{cfg.output_port}/result"
+            if cfg.output_host else None
+        )
+        log.info(f"[{cfg.name}] Waiting for UDP stream on port {cfg.udp_port}")
+        return self._run_capture_loop(cfg, url, output_url)
+
+    def _do_start_udp_packet(self, cfg: ServiceConfig) -> str:
+        """UDP packet-per-frame input — sender sends one JPEG datagram per frame."""
+        try:
+            from ultralytics import YOLO
+            device = _best_device()
+            model = YOLO(cfg.model_path)
+            model.to(device)
+            log.info(f"[{cfg.name}] Model loaded on {device.upper()}")
+            self._model_holder["model"] = model
+        except Exception as e:
+            return f"Failed to load model: {e}"
+
+        import socket as _socket
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        sock.settimeout(1.0)
+        try:
+            sock.bind(("0.0.0.0", cfg.udp_port))
+        except OSError as e:
+            sock.close()
+            self._model_holder["model"] = None
+            return f"Cannot bind UDP socket on port {cfg.udp_port}: {e}"
+
+        output_url = (
+            f"http://{cfg.output_host}:{cfg.output_port}/result"
+            if cfg.output_host else None
+        )
+        log.info(f"[{cfg.name}] UDP packet listener on port {cfg.udp_port} (max 65507 bytes per frame)")
+
+        if cfg.cache_enabled:
+            if not cfg.cache_token:
+                cfg.cache_token = secrets.token_urlsafe(24)
+            self._frame_cache = FrameCache(cfg.cache_max_seconds, cfg.cache_max_frames, cfg.cache_max_bytes)
+        else:
+            self._frame_cache = None
+
+        def _loop():
+            import cv2 as _cv2
+            import torch
+            _frame_count_local = 0
+
+            while not self._stop_event.is_set():
+                try:
+                    data, _ = sock.recvfrom(65535)
+                except _socket.timeout:
+                    continue
+                except OSError:
+                    break
+
+                arr = np.frombuffer(data, dtype=np.uint8)
+                frame = _cv2.imdecode(arr, _cv2.IMREAD_COLOR)
+                if frame is None:
+                    continue
+
+                m = self._model_holder.get("model")
+                if m is None:
+                    break
+
+                try:
+                    if cfg.enhance_gamma != 1.0 or cfg.enhance_clahe:
+                        frame = self._enhance_frame(frame, cfg.enhance_gamma, cfg.enhance_clahe, cfg.enhance_clahe_clip)
+                    with torch.no_grad():
+                        results = m(frame, conf=cfg.conf_threshold, verbose=False)
+                    self._dataset_frame_count += 1
+                    frame_summary = self._process_rtsp_frame(
+                        results, frame, output_url, cfg.name,
+                        cfg.strict_output,
+                        cfg.state_changes_only,
+                        self._dataset_capturing_active, self._dataset_interval_runtime,
+                        self._dataset_dir_runtime, self._dataset_frame_count,
+                        self._config.gate_trigger_mode,
+                        self._config.gate_area_threshold,
+                        self._config.gate_line,
+                        self._config.gate_line_side,
+                        self._config.result_car_count,
+                        self._frame_cache,
+                        cfg.cache_token,
+                    )
+                    if frame_summary:
+                        self._last_payload = frame_summary
+                    if self._preview_enabled and results:
+                        _frame = results[0].plot()
+                        try:
+                            self._preview_queue.put_nowait(_frame)
+                        except queue.Full:
+                            pass
+                        _notify_mjpeg_frame(cfg.name, _frame)
+                except Exception as e:
+                    self._append_log(LogEntry.from_error(str(e)))
+                finally:
+                    try:
+                        del results
+                    except NameError:
+                        pass
+                    _frame_count_local += 1
+                    if _frame_count_local % 500 == 0 and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+            sock.close()
+
+        self._thread = threading.Thread(target=_loop, daemon=True, name=f"UDPPacket-{cfg.name}")
         self._thread.start()
         return ""
 
@@ -1209,6 +1341,7 @@ class DetectionService:
                         self._config.gate_area_threshold,
                         self._config.gate_line,
                         self._config.gate_line_side,
+                        self._config.result_car_count,
                     )
                     if _vs:
                         self._last_payload = _vs
@@ -1326,7 +1459,7 @@ class DetectionService:
         if cfg is None:
             return False
         mode = (cfg.input_mode or ("rtsp" if cfg.rtsp_enabled else "http")).lower()
-        return mode in ("rtsp", "video")
+        return mode in ("rtsp", "video", "udp_stream")
 
     @property
     def is_recording(self) -> bool:
@@ -1336,7 +1469,7 @@ class DetectionService:
         if self._state != STATE_RUNNING:
             return "Service must be running before recording can start."
         if not self.can_record():
-            return "Recording is available only for RTSP/video input services."
+            return "Recording is available only for RTSP/video/UDP-stream input services."
         if self._record_enabled:
             return ""
 
@@ -1394,11 +1527,18 @@ class DetectionService:
     def is_previewing(self) -> bool:
         return self._preview_enabled
 
+    def can_preview(self) -> bool:
+        cfg = self._config
+        if cfg is None:
+            return False
+        mode = (cfg.input_mode or ("rtsp" if cfg.rtsp_enabled else "http")).lower()
+        return mode in ("rtsp", "video", "http", "udp_stream", "udp_packet")
+
     def start_preview(self) -> str:
         if self._state != STATE_RUNNING:
             return "Service must be running before preview can start."
-        if not self.can_record():  # same modes: rtsp / video
-            return "Preview is available only for RTSP/video input services."
+        if not self.can_preview():
+            return "Preview is not available for this input mode."
         # Drain stale frames before enabling
         while not self._preview_queue.empty():
             try:
@@ -1544,6 +1684,9 @@ class DetectionService:
         gate_area_threshold: float = 0.0,
         gate_line: list = [],
         gate_line_side: list = [],
+        result_car_count: int = 1,
+        frame_cache: Optional[FrameCache] = None,
+        cache_token: str = "",
     ) -> dict:
         if not results:
             return {}
@@ -1573,7 +1716,7 @@ class DetectionService:
                     # synthetic no_car so the counting service's grace timer fires for the
                     # departing car before the new car's detections cancel it.
                     buf.clear()
-                    state["misses"] = _MISS_TOLERANCE
+                    state["misses"] = self._dir_miss_tolerance
                     state["idle_streak"] = 0
                     state["prev_area"] = 0.0
                     detected = False
@@ -1585,7 +1728,7 @@ class DetectionService:
             else:
                 confidence = 0.0
                 state["misses"] += 1
-                if state["misses"] >= _MISS_TOLERANCE:
+                if state["misses"] >= self._dir_miss_tolerance:
                     buf.clear()
                     state["prev_area"] = 0.0
 
@@ -1603,16 +1746,16 @@ class DetectionService:
                     "gate_threshold": gate_area_threshold if cls_name == "car" else "",
                     "gate_open": False if cls_name == "car" else "",
                 })
-            elif len(buf_list) >= _MIN_DIR_FRAMES:
+            elif len(buf_list) >= self._dir_min_frames:
                 dbg: dict = {}
                 if cls_name == "car_rear":
                     raw = _determine_direction(
                         buf_list, use_area=False, forward_threshold=2,
-                        backward_threshold=-1, signal_threshold=0.005,
-                        debug_out=dbg,
+                        backward_threshold=-1, signal_threshold=self._dir_signal_threshold,
+                        min_frames=self._dir_min_frames, debug_out=dbg,
                     )
                 else:
-                    raw = _determine_direction(buf_list, debug_out=dbg)
+                    raw = _determine_direction(buf_list, signal_threshold=self._dir_signal_threshold, min_frames=self._dir_min_frames, debug_out=dbg)
                 # car_rear direction signals are physically inverted vs car
                 resolved = _invert_direction(raw) if cls_name == "car_rear" else raw
 
@@ -1621,7 +1764,7 @@ class DetectionService:
                 # consecutive idle readings.
                 if resolved == "idle" and state["last_state"] in ("forward", "backward"):
                     state["idle_streak"] += 1
-                    if state["idle_streak"] < _IDLE_HOLD_FRAMES:
+                    if state["idle_streak"] < self._dir_idle_hold:
                         resolved = state["last_state"]  # hold previous direction
                 else:
                     state["idle_streak"] = 0
@@ -1707,7 +1850,7 @@ class DetectionService:
 
                     ts = self._track_state.setdefault(
                         key,
-                        {"buffer": deque(maxlen=8), "misses": 0,
+                        {"buffer": deque(maxlen=self._dir_buf_size), "misses": 0,
                          "last_state": "", "idle_streak": 0},
                     )
                     tcx, tcy = _bbox_centroid(tbox)
@@ -1716,18 +1859,19 @@ class DetectionService:
                     ts["buffer"].append((tcx, tcy, tarea))
 
                     tbuf = list(ts["buffer"])
-                    if len(tbuf) >= _MIN_DIR_FRAMES:
+                    if len(tbuf) >= self._dir_min_frames:
                         if cls_name == "car_rear":
                             traw = _determine_direction(
                                 tbuf, use_area=False, forward_threshold=2,
-                                backward_threshold=-1, signal_threshold=0.005,
+                                backward_threshold=-1, signal_threshold=self._dir_signal_threshold,
+                                min_frames=self._dir_min_frames,
                             )
                         else:
-                            traw = _determine_direction(tbuf)
+                            traw = _determine_direction(tbuf, signal_threshold=self._dir_signal_threshold, min_frames=self._dir_min_frames)
                         tresolved = _invert_direction(traw) if cls_name == "car_rear" else traw
                         if tresolved == "idle" and ts["last_state"] in ("forward", "backward"):
                             ts["idle_streak"] += 1
-                            if ts["idle_streak"] < _IDLE_HOLD_FRAMES:
+                            if ts["idle_streak"] < self._dir_idle_hold:
                                 tresolved = ts["last_state"]
                         else:
                             ts["idle_streak"] = 0
@@ -1755,16 +1899,16 @@ class DetectionService:
             for key in list(self._track_state.keys()):
                 if key not in current_ids:
                     self._track_state[key]["misses"] += 1
-                    if self._track_state[key]["misses"] >= _MISS_TOLERANCE:
+                    if self._track_state[key]["misses"] >= self._dir_miss_tolerance:
                         ts = self._track_state.pop(key, {})
                         dep_dir = ts.get("last_state", "")
                         buf_len = len(ts.get("buffer", []))
                         # Per-class fallback ONLY when the tracking buffer was too short
-                        # to compute a reliable direction (fewer than _MIN_DIR_FRAMES
+                        # to compute a reliable direction (fewer than _dir_min_frames
                         # frames, e.g. ByteTracker lost the ID on a fast IoU break).
                         # Long-lived tracks that ended in "idle" are left as "idle" so
                         # the counting service can use its cached st["last_dir"].
-                        if dep_dir not in ("forward", "backward") and buf_len < _MIN_DIR_FRAMES:
+                        if dep_dir not in ("forward", "backward") and buf_len < self._dir_min_frames:
                             dep_dir = class_results.get(key[0], {}).get("direction", dep_dir)
                         track_events.append({
                             "cls": key[0], "id": key[1],
@@ -1808,6 +1952,73 @@ class DetectionService:
 
         gate_open = gate_area_open or gate_line_open
 
+        # ── Ranked multi-car output ───────────────────────────────────────────
+        # Separate ranked lists per class: cars (front) and cars_rear (rear).
+        # Within each list rank 1 = largest bbox (closest). Rank 1 reuses the
+        # existing per-class direction result; ranks 2-N use per-slot buffers.
+        def _build_ranked_list(cls_name: str, is_rear: bool) -> list[dict]:
+            if result.boxes is not None and len(result.boxes) > 0:
+                cls_ids = {cid for cid, n in result.names.items() if n == cls_name}
+                boxes_sorted = sorted(
+                    [b for b in result.boxes if int(b.cls[0]) in cls_ids],
+                    key=lambda b: _bbox_area(b),
+                    reverse=True,
+                )
+            else:
+                boxes_sorted = []
+
+            extra_states = self._extra_ranked_states.get(cls_name, [])
+            entries: list[dict] = []
+            for rank in range(1, result_car_count + 1):
+                idx = rank - 1
+                box = boxes_sorted[idx] if idx < len(boxes_sorted) else None
+                if rank == 1:
+                    cr = class_results[cls_name]
+                    entries.append({
+                        "rank":       1,
+                        "detected":   cr["detected"],
+                        "direction":  cr["direction"],
+                        "confidence": cr["confidence"],
+                        "area":       cr["_area"],
+                    })
+                else:
+                    st = extra_states[rank - 2] if rank - 2 < len(extra_states) else None
+                    if st is None or box is None:
+                        if st is not None:
+                            st["misses"] += 1
+                            if st["misses"] >= self._dir_miss_tolerance:
+                                st["buffer"].clear()
+                                st["last_state"] = ""
+                                st["idle_streak"] = 0
+                        entries.append({"rank": rank, "detected": False, "direction": "no_car", "confidence": 0.0, "area": 0.0})
+                    else:
+                        rcx, rcy = _bbox_centroid(box)
+                        rarea = _bbox_area(box)
+                        rconf = float(box.conf[0])
+                        st["misses"] = 0
+                        st["buffer"].append((rcx, rcy, rarea))
+                        rbuf = list(st["buffer"])
+                        if len(rbuf) >= self._dir_min_frames:
+                            if is_rear:
+                                rraw = _determine_direction(rbuf, use_area=False, forward_threshold=2, backward_threshold=-1, signal_threshold=self._dir_signal_threshold, min_frames=self._dir_min_frames)
+                                rresolved = _invert_direction(rraw)
+                            else:
+                                rresolved = _determine_direction(rbuf, signal_threshold=self._dir_signal_threshold, min_frames=self._dir_min_frames)
+                            if rresolved == "idle" and st["last_state"] in ("forward", "backward"):
+                                st["idle_streak"] += 1
+                                if st["idle_streak"] < self._dir_idle_hold:
+                                    rresolved = st["last_state"]
+                            else:
+                                st["idle_streak"] = 0
+                            st["last_state"] = rresolved
+                            entries.append({"rank": rank, "detected": True, "direction": rresolved, "confidence": round(rconf, 4), "area": rarea})
+                        else:
+                            entries.append({"rank": rank, "detected": True, "direction": "idle", "confidence": round(rconf, 4), "area": rarea})
+            return entries
+
+        cars_list      = _build_ranked_list("car",      is_rear=False) if result_car_count >= 1 else []
+        cars_rear_list = _build_ranked_list("car_rear", is_rear=True)  if result_car_count >= 1 else []
+
         payload = {
             "service_name": service_name,
             "timestamp": datetime.now().strftime("%H:%M:%S"),
@@ -1826,7 +2037,13 @@ class DetectionService:
             "gate": {"open": gate_open},
             "frames_analyzed": 1,
             "track_events": track_events,  # None when tracking disabled
+            "cars":      cars_list,
+            "cars_rear": cars_rear_list,
         }
+
+        if frame_cache is not None:
+            # Always present regardless of detection — "last frame from camera".
+            payload["snapshot_url"] = f"/api/detection/services/{service_name}/cache/latest?token={cache_token}"
 
         if state_changes_only:
             should_report = False
@@ -1854,9 +2071,9 @@ class DetectionService:
             rear_ok = (class_results["car_rear"]["detected"]
                        and class_results["car_rear"]["_current_state"] is not None)
             car_just_gone  = (not class_results["car"]["detected"]
-                              and class_results["car"]["_misses"] == _MISS_TOLERANCE)
+                              and class_results["car"]["_misses"] == self._dir_miss_tolerance)
             rear_just_gone = (not class_results["car_rear"]["detected"]
-                              and class_results["car_rear"]["_misses"] == _MISS_TOLERANCE)
+                              and class_results["car_rear"]["_misses"] == self._dir_miss_tolerance)
             should_report = car_ok or rear_ok or car_just_gone or rear_just_gone
         else:
             should_report = True
@@ -1866,7 +2083,37 @@ class DetectionService:
         if track_events and any(not e["detected"] for e in track_events):
             should_report = True
 
+        if frame_cache is not None:
+            # Storage is always dense (every frame, tagged with whether it was
+            # reportable) so `snapshot_url`/latest() never goes stale even when
+            # strict_output/state_changes_only suppress most frames.
+            boxes_out = []
+            if results and results[0].boxes is not None:
+                for b in results[0].boxes:
+                    x1, y1, x2, y2 = b.xyxy[0].tolist()
+                    boxes_out.append({
+                        "cls":  results[0].names.get(int(b.cls[0]), "?"),
+                        "conf": round(float(b.conf[0]), 3),
+                        "xyxy": [round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)],
+                    })
+            import cv2 as _cv2
+            ok, jbuf = _cv2.imencode(".jpg", frame)
+            if ok:
+                frame_cache.add(jbuf.tobytes(), boxes_out, reported=should_report)
+
         if should_report:
+            if frame_cache is not None:
+                # Backtrack window: only the frames that were themselves reportable,
+                # oldest first — synced to strict_output/state_changes_only so this
+                # list reflects the same "changes" the client is already seeing.
+                payload["cache"] = [
+                    {
+                        "url": f"/api/detection/services/{service_name}/cache/frame/{f.id}?token={cache_token}",
+                        "timestamp": datetime.fromtimestamp(f.ts).strftime("%H:%M:%S.%f")[:-3],
+                        "boxes": f.boxes,
+                    }
+                    for f in frame_cache.reported_snapshot()
+                ]
             self._append_log(LogEntry.from_result(payload))
             _notify_internal(service_name, payload)
             if output_url:
@@ -1927,9 +2174,10 @@ class DetectionService:
         self._error_msg = ""
         self._thread = None
         self._reader_thread = None
-        self._class_state = self._make_class_state()
+        self._class_state = self._make_class_state(self._dir_buf_size)
         self._gate_last_open = False
         self._dataset_frame_count = 0
+        self._extra_ranked_states = {}
 
 
 # ── Service registry ───────────────────────────────────────────────────────────
@@ -1955,6 +2203,10 @@ class ServiceRegistry:
         with self._lock:
             for i, c in enumerate(self._configs):
                 if c.name == cfg.name:
+                    if not cfg.cache_token:
+                        cfg.cache_token = c.cache_token
+                    if cfg.cache_enabled and not cfg.cache_token:
+                        cfg.cache_token = secrets.token_urlsafe(24)
                     self._configs[i] = cfg
                     self._save()
                     # Push gate params to the live service so they take effect immediately
@@ -1962,6 +2214,8 @@ class ServiceRegistry:
                     if svc is not None:
                         svc._config = cfg
                     return
+            if cfg.cache_enabled and not cfg.cache_token:
+                cfg.cache_token = secrets.token_urlsafe(24)
             self._configs.append(cfg)
             self._save()
 
@@ -2011,6 +2265,9 @@ class ServiceRegistry:
                 f"Port {cfg.input_port} is already in use.\n"
                 f"Choose a different port or stop the process using it."
             )
+
+        if mode in ("udp_stream", "udp_packet") and cfg.udp_port <= 0:
+            return f"UDP port must be set (got {cfg.udp_port})."
 
         if mode == "video" and not os.path.isfile(cfg.video_path):
             return f"Video file not found:\n{cfg.video_path}"
